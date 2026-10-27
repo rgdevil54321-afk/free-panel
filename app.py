@@ -349,16 +349,17 @@ def dashboard():
     vps = None
     if selected_id:
         vps = next((v for v in all_vps if v["id"] == selected_id), None)
-        if not vps:
-            # admin can open any VPS by id
-            if current_user.is_admin:
-                vps = db.execute("SELECT * FROM vps WHERE id=?", (selected_id,)).fetchone()
-                if vps:
-                    all_vps = [vps] + [x for x in all_vps if x["id"] != selected_id]
+        if not vps and current_user.is_admin:
+            vps = db.execute("SELECT * FROM vps WHERE id=?", (selected_id,)).fetchone()
+            if vps:
+                all_vps = [vps] + [x for x in all_vps if x["id"] != selected_id]
     if selected_id and not vps and not current_user.is_admin:
         flash("VPS not found"); return redirect(url_for("dashboard"))
-    if not vps and all_vps:
+    if not vps and all_vps and not current_user.is_admin:
         vps = all_vps[0]
+    # admins without an explicit VPS go to the admin panel instead of someone's VPS
+    if current_user.is_admin and not selected_id:
+        return redirect(url_for("admin"))
 
     if vps and vps["status"] in ("running","stopped"):
         real = sync_status(vps["container_id"], vps["status"])
