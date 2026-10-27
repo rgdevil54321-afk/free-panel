@@ -671,7 +671,7 @@ def _start_sshx_session(inst) -> str | None:
     try:
         _exec(inst, ["bash", "-c", "pkill sshx 2>/dev/null; rm -f /tmp/sshx.log; true"])
         _exec(inst, ["bash", "-c",
-                     "NO_COLOR=1 TERM=dumb nohup sshx > /tmp/sshx.log 2>&1 < /dev/null & disown"])
+                     "setsid sh -c 'NO_COLOR=1 TERM=dumb nohup sshx > /tmp/sshx.log 2>&1 < /dev/null' >/dev/null 2>&1 &"])
         # Wait up to 30s for sshx to print its link
         for tick in range(30):
             time.sleep(1)
