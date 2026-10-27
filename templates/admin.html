@@ -79,15 +79,26 @@
 
 <!-- VPSes -->
 <div class="admin-section" id="sec-vpses">
-  <div class="flex-b" style="margin-bottom:1rem;"><span style="font-size:1.05rem;font-weight:600;color:var(--text);">All VPSes</span><span style="font-size:.72rem;color:var(--text-3);">{{ vpses|length }} total</span></div>
+  <div class="flex-b" style="margin-bottom:.75rem;"><span style="font-size:1.05rem;font-weight:600;color:var(--text);">All VPSes</span><span style="font-size:.72rem;color:var(--text-3);">{{ vpses|length }} total</span></div>
+  <div style="display:flex;gap:.5rem;margin-bottom:.75rem;flex-wrap:wrap;align-items:center;">
+    <input id="vps-search" class="form-input" placeholder="Search username / container..." style="max-width:260px;" oninput="filterVps()">
+    <select name="action" class="form-input" style="width:auto;">
+      <option value="suspend">Suspend selected</option>
+      <option value="unsuspend">Unsuspend selected</option>
+      <option value="delete">Delete selected</option>
+    </select>
+    <button type="submit" class="btn btn-warn btn-sm" onclick="return confirm('Apply to selected VPSes?')">Apply</button>
+  </div>
+  <form method="post" action="{{ url_for('admin_vps_bulk') }}" id="vps-bulk-form">
   <div style="background:var(--bg-1);border:1px solid var(--border);border-radius:var(--r-xl);overflow:hidden;">
     <div style="overflow-x:auto;">
-      <table>
-        <thead><tr><th>User</th><th>Container</th><th>SSH port</th><th>Status</th><th>KVM</th><th>Actions</th></tr></thead>
+      <table id="vps-table">
+        <thead><tr><th><input type="checkbox" onclick="toggleAllVps(this)"></th><th>User</th><th>Container</th><th>SSH port</th><th>Status</th><th>KVM</th><th>Actions</th></tr></thead>
         <tbody>
           {% for v in vpses %}
           {% set nat = nat_rules | selectattr('vps_id','equalto',v.id) | first | default(none) %}
           <tr>
+            <td><input type="checkbox" name="vps_ids" value="{{ v.id }}" class="vps-cb"></td>
             <td class="mono" style="color:var(--text);">{{ v.username }}</td>
             <td class="mono" style="font-size:.7rem;">{{ v.container_id[:20] }}</td>
             <td class="mono" style="color:var(--accent);">{{ nat.ssh_port if nat else '—' }}</td>
@@ -96,28 +107,18 @@
             <td>
               <div style="display:flex;gap:.3rem;flex-wrap:wrap;">
                 {% if v.status == 'running' %}
-                <form method="post" action="{{ url_for('admin_vps_action', vps_id=v.id, action='suspend') }}">
+                <form method="post" action="{{ url_for('admin_vps_action', vps_id=v.id, action='suspend') }}" style="margin:0;">
                   <button class="btn btn-warn btn-sm">Suspend</button>
                 </form>
                 {% elif v.status == 'suspended' %}
-                <form method="post" action="{{ url_for('admin_vps_action', vps_id=v.id, action='unsuspend') }}">
+                <form method="post" action="{{ url_for('admin_vps_action', vps_id=v.id, action='unsuspend') }}" style="margin:0;">
                   <button class="btn btn-primary btn-sm">Unsuspend</button>
                 </form>
                 {% endif %}
-                {% if host_kvm %}
-                {% if v.kvm_enabled %}
-                <form method="post" action="{{ url_for('admin_vps_action', vps_id=v.id, action='disable_kvm') }}">
-                  <button class="btn btn-ghost btn-sm">KVM off</button>
-                </form>
-                {% else %}
-                <form method="post" action="{{ url_for('admin_vps_action', vps_id=v.id, action='enable_kvm') }}">
-                  <button class="btn btn-ghost btn-sm">KVM on</button>
-                </form>
-                {% endif %}
-                {% endif %}
+                <button type="button" class="btn btn-ghost btn-sm" onclick="openResModal({{ v.id }})">Resources</button>
                 <a href="{{ url_for('dashboard', vps_id=v.id) }}" class="btn btn-primary btn-sm">Manage</a>
                 <form method="post" action="{{ url_for('admin_vps_action', vps_id=v.id, action='delete') }}"
-                      onsubmit="return confirm('Delete {{ v.container_id }}?')">
+                      onsubmit="return confirm('Delete {{ v.container_id }}?')" style="margin:0;">
                   <button class="btn btn-danger btn-sm">Delete</button>
                 </form>
               </div>
@@ -128,17 +129,29 @@
       </table>
     </div>
   </div>
+  </form>
 </div>
 
 <!-- Users -->
 <div class="admin-section" id="sec-users">
-  <div class="flex-b" style="margin-bottom:1rem;"><span style="font-size:1.05rem;font-weight:600;color:var(--text);">Users</span><span style="font-size:.72rem;color:var(--text-3);">{{ users|length }} registered</span></div>
+  <div class="flex-b" style="margin-bottom:.75rem;"><span style="font-size:1.05rem;font-weight:600;color:var(--text);">Users</span><span style="font-size:.72rem;color:var(--text-3);">{{ users|length }} registered</span></div>
+  <div style="display:flex;gap:.5rem;margin-bottom:.75rem;flex-wrap:wrap;align-items:center;">
+    <input id="user-search" class="form-input" placeholder="Search username / IP..." style="max-width:260px;" oninput="filterUsers()">
+    <select name="action" form="user-bulk-form" class="form-input" style="width:auto;">
+      <option value="suspend">Suspend selected</option>
+      <option value="unsuspend">Unsuspend selected</option>
+      <option value="delete">Delete selected</option>
+    </select>
+    <button type="submit" form="user-bulk-form" class="btn btn-warn btn-sm" onclick="return confirm('Apply to selected users?')">Apply</button>
+  </div>
+  <form method="post" action="{{ url_for('admin_users_bulk') }}" id="user-bulk-form">
   <div style="background:var(--bg-1);border:1px solid var(--border);border-radius:var(--r-xl);overflow:hidden;">
-    <table>
-      <thead><tr><th>ID</th><th>Username</th><th>Signup IP</th><th>Role</th><th>Status</th><th>VPN</th><th>Joined</th><th>Actions</th></tr></thead>
+    <table id="user-table">
+      <thead><tr><th><input type="checkbox" onclick="toggleAllUsers(this)"></th><th>ID</th><th>Username</th><th>Signup IP</th><th>Role</th><th>Status</th><th>VPN</th><th>Joined</th><th>Actions</th></tr></thead>
       <tbody>
         {% for u in users %}
         <tr>
+          <td>{% if not u.is_admin %}<input type="checkbox" name="user_ids" value="{{ u.id }}" class="user-cb">{% endif %}</td>
           <td class="mono" style="color:var(--text-3);">{{ u.id }}</td>
           <td class="mono" style="color:var(--text);">{{ u.username }}</td>
           <td class="mono" style="font-size:.72rem;">{{ u.signup_ip }}</td>
@@ -214,6 +227,7 @@
       </tbody>
     </table>
   </div>
+  </form>
 </div>
 
 <!-- NAT / Ports -->
@@ -326,6 +340,31 @@
   </div>
 </div>
 
+<!-- Resources modal -->
+<div id="res-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.6);z-index:1000;align-items:center;justify-content:center;">
+  <div style="background:var(--bg-1);border:1px solid var(--border);border-radius:var(--r-xl);padding:1.25rem;max-width:400px;width:90%;">
+    <h3 style="margin-bottom:.75rem;">Update VPS resources</h3>
+    <form method="post" id="res-form">
+      <div class="form-group">
+        <label class="form-label">CPU cores</label>
+        <input name="cpu_cores" type="number" class="form-input" min="1" max="32">
+      </div>
+      <div class="form-group">
+        <label class="form-label">RAM (GB)</label>
+        <input name="ram_gb" type="number" class="form-input" min="1" max="256">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Disk (GB)</label>
+        <input name="disk_gb" type="number" class="form-input" min="5" max="2000">
+      </div>
+      <div style="display:flex;gap:.5rem;">
+        <button type="submit" class="btn btn-primary">Save</button>
+        <button type="button" class="btn btn-ghost" onclick="closeResModal()">Cancel</button>
+      </div>
+    </form>
+  </div>
+</div>
+
 </main>
 </div>
 </div>
@@ -336,6 +375,31 @@ function showSec(name){
   const s=document.getElementById('sec-'+name), n=document.getElementById('nav-'+name);
   if(s) s.classList.add('active'); if(n) n.classList.add('active');
   event.preventDefault();
+}
+function filterVps(){
+  const q=(document.getElementById('vps-search').value||'').toLowerCase();
+  document.querySelectorAll('#vps-table tbody tr').forEach(tr=>{
+    tr.style.display = tr.textContent.toLowerCase().includes(q) ? '' : 'none';
+  });
+}
+function filterUsers(){
+  const q=(document.getElementById('user-search').value||'').toLowerCase();
+  document.querySelectorAll('#user-table tbody tr').forEach(tr=>{
+    tr.style.display = tr.textContent.toLowerCase().includes(q) ? '' : 'none';
+  });
+}
+function toggleAllVps(cb){
+  document.querySelectorAll('.vps-cb').forEach(c=>c.checked=cb.checked);
+}
+function toggleAllUsers(cb){
+  document.querySelectorAll('.user-cb').forEach(c=>c.checked=cb.checked);
+}
+function openResModal(id){
+  document.getElementById('res-form').action = '/admin/vps/'+id+'/resources';
+  document.getElementById('res-modal').style.display='flex';
+}
+function closeResModal(){
+  document.getElementById('res-modal').style.display='none';
 }
 </script>
 {% endblock %}

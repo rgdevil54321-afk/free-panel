@@ -26,6 +26,7 @@ from vps import (
     kvm_available, set_kvm_enabled,
     get_root_password, reset_root_password,
     get_max_vps_per_node, generate_password,
+    update_vps_resources,
 )
 from monitor import start_monitor
 import queue_manager as queue
@@ -1058,6 +1059,92 @@ def admin_ip_unban(ban_id):
     db.execute("DELETE FROM banned_ips WHERE id=?", (ban_id,))
     db.commit()
     flash("IP unbanned")
+    return redirect(url_for("admin"))
+
+@app.route("/admin/vps/<int:vps_id>/resources", methods=["POST"])
+@login_required
+def admin_vps_resources(vps_id):
+    if not current_user.is_admin: return "Forbidden", 403
+    db = get_db()
+    vps = db.execute("SELECT * FROM vps WHERE id=?", (vps_id,)).fetchone()
+    if not vps:
+        flash("VPS not found"); return redirect(url_for("admin"))
+    try:
+        cpu = int(request.form.get("cpu_cores", 0)) or None
+        ram_gb = int(request.form.get("ram_gb", 0)) or None
+        disk_gb = int(request.form.get("disk_gb", 0)) or None
+    except ValueError:
+        flash("Invalid numbers"); return redirect(url_for("admin"))
+    ram_mb = ram_gb * 1024 if ram_gb else None
+    ok, msg = update_vps_resources(vps["container_id"], cpu=cpu, ram_mb=ram_mb, disk_gb=disk_gb)
+    flash(f"Resources {'updated' if ok else 'failed'}: {msg}")
+    return redirect(url_for("admin"))
+
+@app.route("/admin/vps/bulk", methods=["POST"])
+@login_required
+def admin_vps_bulk():
+    if not current_user.is_admin: return "Forbidden", 403
+    action = request.form.get("action", "")
+    ids = request.form.getlist("vps_ids")
+    db = get_db()
+    for vid in ids:
+        try: vid = int(vid)
+        except: continue
+        vps = db.execute("SELECT * FROM vps WHERE id=?", (vid,)).fetchone()
+        if not vps: continue
+        if action == "delete":
+            try: nat.deprovision_nat(db, vid)
+            except: pass
+            try: destroy_vps(vps["container_id"])
+            except: pass
+            db.execute("DELETE FROM vps WHERE id=?", (vid,))
+        elif action == "suspend":
+            try: suspend_vps(vps["container_id"])
+            except: pass
+            db.execute("UPDATE vps SET status='suspended' WHERE id=?", (vid,))
+        elif action == "unsuspend":
+            try: unsuspend_vps(vps["container_id"])
+            except: pass
+            db.execute("UPDATE vps SET status='running' WHERE id=?", (vid,))
+    db.commit()
+    flash(f"Bulk {action} done for {len(ids)} VPS(es).")
+    return redirect(url_for("admin"))
+
+@app.route("/admin/users/bulk", methods=["POST"])
+@login_required
+def admin_users_bulk():
+    if not current_user.is_admin: return "Forbidden", 403
+    action = request.form.get("action", "")
+    ids = request.form.getlist("user_ids")
+    db = get_db()
+    for uid in ids:
+        try: uid = int(uid)
+        except: continue
+        if uid == current_user.id: continue
+        if action == "delete":
+            for v in db.execute("SELECT id,container_id FROM vps WHERE user_id=?", (uid,)).fetchall():
+                try: nat.deprovision_nat(db, v["id"])
+                except: pass
+                try: destroy_vps(v["container_id"])
+                except: pass
+            db.execute("DELETE FROM vps WHERE user_id=?", (uid,))
+            db.execute("DELETE FROM feedback WHERE user_id=?", (uid,))
+            db.execute("DELETE FROM users WHERE id=?", (uid,))
+        elif action == "suspend":
+            db.execute("UPDATE users SET is_suspended=1, suspended_reason=?, suspended_at=? WHERE id=?",
+                       ("Bulk suspended", int(time.time()), uid))
+            for v in db.execute("SELECT container_id FROM vps WHERE user_id=?", (uid,)).fetchall():
+                try: suspend_vps(v["container_id"])
+                except: pass
+            db.execute("UPDATE vps SET status='suspended' WHERE user_id=?", (uid,))
+        elif action == "unsuspend":
+            db.execute("UPDATE users SET is_suspended=0, suspended_reason=NULL, suspended_at=NULL WHERE id=?", (uid,))
+            for v in db.execute("SELECT container_id FROM vps WHERE user_id=?", (uid,)).fetchall():
+                try: unsuspend_vps(v["container_id"])
+                except: pass
+            db.execute("UPDATE vps SET status='running' WHERE user_id=? AND status='suspended'", (uid,))
+    db.commit()
+    flash(f"Bulk {action} done for {len(ids)} user(s).")
     return redirect(url_for("admin"))
 
 # ── Nodes ─────────────────────────────────────────────────────────────────────

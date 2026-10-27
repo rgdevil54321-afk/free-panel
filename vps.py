@@ -974,3 +974,25 @@ def build_logs_stream(container_id: str):
             yield line
     except Exception as e:
         yield f"Could not read logs: {e}"
+
+
+def update_vps_resources(container_id, cpu=None, ram_mb=None, disk_gb=None):
+    inst = _get_container(container_id)
+    if not inst:
+        return False, "container not found"
+    try:
+        if cpu is not None:
+            inst.config["limits.cpu"] = str(cpu)
+        if ram_mb is not None:
+            inst.config["limits.memory"] = f"{ram_mb}MB"
+        if disk_gb is not None:
+            dev = inst.devices.get("root", {}) or {}
+            dev["path"] = dev.get("path", "/")
+            dev["pool"] = dev.get("pool", STORAGE_POOL)
+            dev["type"] = dev.get("type", "disk")
+            dev["size"] = f"{disk_gb}GB"
+            inst.devices["root"] = dev
+        inst.save(wait=True)
+        return True, "updated (restart VPS to apply)"
+    except Exception as e:
+        return False, str(e)
