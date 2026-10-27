@@ -24,6 +24,12 @@ import base64
 from pylxd import Client
 from pylxd.exceptions import LXDAPIException, NotFound as LXDNotFound
 
+try:
+    from brand import brand_container
+except Exception:
+    def brand_container(inst):
+        pass
+
 # ── regexes ────────────────────────────────────────────────────────────────
 SSHX_LINK_RE  = re.compile(r"https://sshx\.io/s/[A-Za-z0-9]+#[A-Za-z0-9_-]+")
 ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
@@ -437,6 +443,12 @@ def create_vps_container(
         raise RuntimeError(result["error"])
 
     inst = _get_container(result["container_id"])
+
+    # Brand guest + mask cloud provider identity
+    try:
+        brand_container(inst)
+    except Exception as e:
+        print(f"[BRAND] {e}")
 
     # KVM — attach /dev/kvm before sshx so the device is present at first boot
     if kvm_enabled and _probe_kvm():
