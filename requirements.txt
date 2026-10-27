@@ -3,4 +3,3 @@ flask-login>=0.6
 werkzeug>=3.0
 requests>=2.31
 pylxd>=2.3
-EOF
