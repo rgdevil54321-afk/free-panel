@@ -115,6 +115,7 @@
                 </form>
                 {% endif %}
                 {% endif %}
+                <a href="{{ url_for('dashboard', vps_id=v.id) }}" class="btn btn-primary btn-sm">Manage</a>
                 <form method="post" action="{{ url_for('admin_vps_action', vps_id=v.id, action='delete') }}"
                       onsubmit="return confirm('Delete {{ v.container_id }}?')">
                   <button class="btn btn-danger btn-sm">Delete</button>

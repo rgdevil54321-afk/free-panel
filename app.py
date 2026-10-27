@@ -338,13 +338,24 @@ def delete_account():
 @login_required
 def dashboard():
     db      = get_db()
-    all_vps = db.execute(
-        "SELECT * FROM vps WHERE user_id=? ORDER BY created_at ASC", (current_user.id,)
-    ).fetchall()
+    if current_user.is_admin:
+        all_vps = db.execute("SELECT * FROM vps ORDER BY created_at ASC").fetchall()
+    else:
+        all_vps = db.execute(
+            "SELECT * FROM vps WHERE user_id=? ORDER BY created_at ASC", (current_user.id,)
+        ).fetchall()
     selected_id = request.args.get("vps_id", type=int)
     vps = None
     if selected_id:
         vps = next((v for v in all_vps if v["id"] == selected_id), None)
+        if not vps:
+            # admin can open any VPS by id
+            if current_user.is_admin:
+                vps = db.execute("SELECT * FROM vps WHERE id=?", (selected_id,)).fetchone()
+                if vps:
+                    all_vps = [vps] + [x for x in all_vps if x["id"] != selected_id]
+    if selected_id and not vps and not current_user.is_admin:
+        flash("VPS not found"); return redirect(url_for("dashboard"))
     if not vps and all_vps:
         vps = all_vps[0]
 
@@ -396,25 +407,25 @@ def vps_create():
 
     user_row = db.execute("SELECT is_suspended, signup_ip FROM users WHERE id=?", (current_user.id,)).fetchone()
     if user_row and user_row["is_suspended"]:
-        return "Account suspended", 403
+        flash("Account suspended."); return redirect(url_for("dashboard"))
     if db.execute("SELECT 1 FROM banned_ips WHERE ip=?", (ip,)).fetchone() or \
        (user_row and db.execute("SELECT 1 FROM banned_ips WHERE ip=?", (user_row["signup_ip"],)).fetchone()):
-        return "This IP is banned", 403
+        flash("This IP is banned."); return redirect(url_for("dashboard"))
     if db.execute("SELECT 1 FROM vps WHERE user_id=?", (current_user.id,)).fetchone():
-        return "You already have a VPS", 403
+        flash("You already have a VPS."); return redirect(url_for("dashboard"))
     if db.execute("SELECT 1 FROM vps WHERE creator_ip=?", (ip,)).fetchone():
-        return "This IP already has a VPS", 403
+        flash("This IP already has a VPS."); return redirect(url_for("dashboard"))
     user_row = db.execute("SELECT signup_ip FROM users WHERE id=?", (current_user.id,)).fetchone()
     if db.execute("SELECT 1 FROM vps WHERE creator_ip=?", (user_row["signup_ip"],)).fetchone():
-        return "Your signup IP already has a VPS", 403
+        flash("Your signup IP already has a VPS."); return redirect(url_for("dashboard"))
 
     is_vpn, vpn_label = ip_intel.is_vpn_or_proxy(ip)
     if is_vpn:
-        return f"VPN/proxy detected ({vpn_label}) — disable it and try again.", 403
+        flash(f"VPN/proxy detected ({vpn_label}) - disable it and try again."); return redirect(url_for("dashboard"))
 
     found_elsewhere, other_url = node_mesh.check_ip_across_mesh(db, ip)
     if found_elsewhere:
-        return f"This IP already has a VPS on another node ({other_url})", 403
+        flash(f"This IP already has a VPS on another node ({other_url})."); return redirect(url_for("dashboard"))
 
     allowed, current_count = can_create_vps()
     if not allowed:
@@ -433,16 +444,16 @@ def vps_create():
                              daemon=True).start()
             flash(f"Node full — VPS being created on {peer_url}.")
             return redirect(url_for("vps_view", vps_id=vps_id))
-        return "Node full and no peer nodes available. Try again later.", 503
+        flash("Node full and no peer nodes available. Try again later."); return redirect(url_for("dashboard"))
 
     disk_ok, disk_alloc, disk_budget, disk_msg = can_allocate_disk(get_free_vps_disk())
     if not disk_ok:
-        return disk_msg or f"Disk budget reached ({disk_alloc}/{disk_budget}GB).", 503
+        flash(disk_msg or f"Disk budget reached ({disk_alloc}/{disk_budget}GB)."); return redirect(url_for("dashboard"))
 
     now        = int(time.time())
     last_click = _last_create_click.get(ip, 0)
     if now - last_click < CREATE_DEBOUNCE_SECONDS:
-        return "Please wait a few seconds before retrying.", 429
+        flash("Please wait a few seconds before retrying."); return redirect(url_for("dashboard"))
     _last_create_click[ip] = now
 
     cur    = db.execute(
