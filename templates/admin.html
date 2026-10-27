@@ -29,6 +29,7 @@
     <a href="#" onclick="showSec('overview')" id="nav-overview" class="active">&#9642; Overview</a>
     <a href="#" onclick="showSec('vpses')"    id="nav-vpses">&#9632; VPSes</a>
     <a href="#" onclick="showSec('users')"    id="nav-users">&#9675; Users</a>
+    <a href="#" onclick="showSec('bans')"     id="nav-bans">&#9679; IP Bans</a>
     <a href="#" onclick="showSec('nat')"      id="nav-nat">&#9670; NAT / Ports</a>
     <a href="#" onclick="showSec('grant')"    id="nav-grant">&#9650; Grant VPS</a>
     <a href="#" onclick="showSec('config')"   id="nav-config">&#9881; Config</a>
@@ -133,7 +134,7 @@
   <div class="flex-b" style="margin-bottom:1rem;"><span style="font-size:1.05rem;font-weight:600;color:var(--text);">Users</span><span style="font-size:.72rem;color:var(--text-3);">{{ users|length }} registered</span></div>
   <div style="background:var(--bg-1);border:1px solid var(--border);border-radius:var(--r-xl);overflow:hidden;">
     <table>
-      <thead><tr><th>ID</th><th>Username</th><th>Signup IP</th><th>Role</th><th>VPN</th><th>Joined</th></tr></thead>
+      <thead><tr><th>ID</th><th>Username</th><th>Signup IP</th><th>Role</th><th>Status</th><th>VPN</th><th>Joined</th><th>Actions</th></tr></thead>
       <tbody>
         {% for u in users %}
         <tr>
@@ -141,9 +142,73 @@
           <td class="mono" style="color:var(--text);">{{ u.username }}</td>
           <td class="mono" style="font-size:.72rem;">{{ u.signup_ip }}</td>
           <td>{% if u.is_admin %}<span class="badge badge-purple">admin</span>{% else %}<span class="badge badge-grey">user</span>{% endif %}</td>
+          <td>{% if u.is_suspended %}<span class="badge badge-red">suspended</span>{% else %}<span class="badge badge-green">active</span>{% endif %}</td>
           <td>{% if u.is_vpn_signup %}<span class="badge badge-yellow" title="{{ u.vpn_provider }}">VPN</span>{% else %}—{% endif %}</td>
           <td class="mono" style="font-size:.68rem;color:var(--text-3);">{{ u.created_at | strftime }}</td>
+          <td>
+            <div style="display:flex;gap:.3rem;flex-wrap:wrap;">
+              {% if not u.is_admin %}
+              {% if u.is_suspended %}
+              <form method="post" action="{{ url_for('admin_user_unsuspend', user_id=u.id) }}">
+                <button class="btn btn-primary btn-sm">Unsuspend</button>
+              </form>
+              {% else %}
+              <form method="post" action="{{ url_for('admin_user_suspend', user_id=u.id) }}">
+                <input type="hidden" name="reason" value="Suspended by admin">
+                <button class="btn btn-warn btn-sm">Suspend</button>
+              </form>
+              {% endif %}
+              <form method="post" action="{{ url_for('admin_user_reset_password', user_id=u.id) }}">
+                <button class="btn btn-ghost btn-sm">Reset PW</button>
+              </form>
+              <form method="post" action="{{ url_for('admin_user_delete', user_id=u.id) }}"
+                    onsubmit="return confirm('Delete user {{ u.username }}?')">
+                <button class="btn btn-danger btn-sm">Delete</button>
+              </form>
+              {% endif %}
+            </div>
+          </td>
         </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </div>
+</div>
+
+<!-- IP Bans -->
+<div class="admin-section" id="sec-bans">
+  <div class="flex-b" style="margin-bottom:1rem;"><span style="font-size:1.05rem;font-weight:600;color:var(--text);">IP Bans</span><span style="font-size:.72rem;color:var(--text-3);">{{ banned_ips|length }} banned</span></div>
+  <div class="section-card" style="max-width:520px;margin-bottom:1rem;">
+    <form method="post" action="{{ url_for('admin_ip_ban') }}">
+      <div class="form-group">
+        <label class="form-label">IP address</label>
+        <input name="ip" class="form-input" placeholder="1.2.3.4">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Reason (optional)</label>
+        <input name="reason" class="form-input" placeholder="Abuse / multi-account">
+      </div>
+      <button type="submit" class="btn btn-danger">Ban IP</button>
+    </form>
+  </div>
+  <div style="background:var(--bg-1);border:1px solid var(--border);border-radius:var(--r-xl);overflow:hidden;">
+    <table>
+      <thead><tr><th>ID</th><th>IP</th><th>Reason</th><th>Banned at</th><th>Action</th></tr></thead>
+      <tbody>
+        {% for b in banned_ips %}
+        <tr>
+          <td class="mono" style="color:var(--text-3);">{{ b.id }}</td>
+          <td class="mono" style="color:var(--accent);">{{ b.ip }}</td>
+          <td style="font-size:.75rem;">{{ b.reason or '—' }}</td>
+          <td class="mono" style="font-size:.68rem;color:var(--text-3);">{{ b.created_at | strftime }}</td>
+          <td>
+            <form method="post" action="{{ url_for('admin_ip_unban', ban_id=b.id) }}">
+              <button class="btn btn-ghost btn-sm">Unban</button>
+            </form>
+          </td>
+        </tr>
+        {% else %}
+        <tr><td colspan="5" style="text-align:center;color:var(--text-3);padding:1.5rem;">No banned IPs.</td></tr>
         {% endfor %}
       </tbody>
     </table>
@@ -229,6 +294,10 @@
       <div class="form-group">
         <label class="form-label">Disk per VPS (GB)</label>
         <input name="vps_disk_gb" type="number" class="form-input" min="5" max="2000" value="{{ config.get('vps_disk_gb',80) }}">
+      </div>
+      <div class="form-group">
+        <label class="form-label">Max VPS slots per node</label>
+        <input name="vps_max_per_node" type="number" class="form-input" min="1" max="10000" value="{{ config.get('vps_max_per_node',150) }}">
       </div>
       <button type="submit" class="btn btn-primary">Save limits</button>
     </form>

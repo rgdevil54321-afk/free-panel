@@ -25,6 +25,7 @@ from vps import (
     get_free_vps_cpu, get_free_vps_ram, get_free_vps_disk,
     kvm_available, set_kvm_enabled,
     get_root_password, reset_root_password,
+    get_max_vps_per_node, generate_password,
 )
 from monitor import start_monitor
 import queue_manager as queue
@@ -83,7 +84,24 @@ def init_db():
         recovery_code_shown INTEGER DEFAULT 0,
         youtube_verified INTEGER DEFAULT 0,
         is_vpn_signup INTEGER DEFAULT 0,
-        vpn_provider TEXT
+        vpn_provider TEXT,
+        is_suspended INTEGER DEFAULT 0,
+        suspended_reason TEXT,
+        suspended_at INTEGER
+    );
+    CREATE TABLE IF NOT EXISTS banned_ips (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ip TEXT UNIQUE NOT NULL,
+        reason TEXT,
+        created_at INTEGER NOT NULL,
+        banned_by INTEGER
+    );
+    CREATE TABLE IF NOT EXISTS admin_audit (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        admin_id INTEGER,
+        action TEXT NOT NULL,
+        target TEXT,
+        created_at INTEGER NOT NULL
     );
     CREATE TABLE IF NOT EXISTS vps (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -121,6 +139,9 @@ def init_db():
         "ALTER TABLE users ADD COLUMN youtube_verified INTEGER DEFAULT 0",
         "ALTER TABLE vps ADD COLUMN node_id INTEGER DEFAULT 0",
         "ALTER TABLE vps ADD COLUMN kvm_enabled INTEGER DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN is_suspended INTEGER DEFAULT 0",
+        "ALTER TABLE users ADD COLUMN suspended_reason TEXT",
+        "ALTER TABLE users ADD COLUMN suspended_at INTEGER",
     ]:
         try: db.execute(stmt)
         except: pass
@@ -204,6 +225,8 @@ def register():
         if len(p) < 6:
             return render_template("register.html", error="Password must be ≥6 characters.")
         db = get_db()
+        if db.execute("SELECT 1 FROM banned_ips WHERE ip=?", (ip,)).fetchone():
+            return render_template("register.html", error="This IP is banned.")
         if db.execute("SELECT 1 FROM users WHERE username=?", (u,)).fetchone():
             return render_template("register.html", error="Username already taken.")
         is_vpn, vpn_label = ip_intel.is_vpn_or_proxy(ip)
@@ -222,7 +245,12 @@ def login():
         u   = request.form.get("username","").strip()
         p   = request.form.get("password","")
         db  = get_db()
+        ip  = request.remote_addr
+        if db.execute("SELECT 1 FROM banned_ips WHERE ip=?", (ip,)).fetchone():
+            return render_template("login.html", error="This IP is banned.")
         row = db.execute("SELECT * FROM users WHERE username=?", (u,)).fetchone()
+        if row and row["is_suspended"]:
+            return render_template("login.html", error="Account suspended.")
         if row and check_password_hash(row["password"], p):
             login_user(User(row), remember=True)
             if not row["recovery_code_shown"]:
@@ -366,6 +394,12 @@ def vps_create():
     db = get_db()
     ip = request.remote_addr
 
+    user_row = db.execute("SELECT is_suspended, signup_ip FROM users WHERE id=?", (current_user.id,)).fetchone()
+    if user_row and user_row["is_suspended"]:
+        return "Account suspended", 403
+    if db.execute("SELECT 1 FROM banned_ips WHERE ip=?", (ip,)).fetchone() or \
+       (user_row and db.execute("SELECT 1 FROM banned_ips WHERE ip=?", (user_row["signup_ip"],)).fetchone()):
+        return "This IP is banned", 403
     if db.execute("SELECT 1 FROM vps WHERE user_id=?", (current_user.id,)).fetchone():
         return "You already have a VPS", 403
     if db.execute("SELECT 1 FROM vps WHERE creator_ip=?", (ip,)).fetchone():
@@ -815,21 +849,23 @@ def admin():
         "SELECT vps.*,users.username FROM vps JOIN users ON users.id=vps.user_id"
     ).fetchall()
     users = db.execute(
-        "SELECT id,username,signup_ip,is_admin,created_at,is_vpn_signup,vpn_provider FROM users"
+        "SELECT id,username,signup_ip,is_admin,created_at,is_vpn_signup,vpn_provider,is_suspended,suspended_reason FROM users"
     ).fetchall()
     bc    = db.execute("SELECT message,active FROM broadcast WHERE id=1").fetchone()
     host  = get_host_capacity()
     cfg   = {r["key"]:r["value"] for r in db.execute("SELECT key,value FROM panel_config").fetchall()}
     nat_rules = db.execute("SELECT * FROM nat_rules ORDER BY ssh_port").fetchall()
+    banned_ips = db.execute("SELECT * FROM banned_ips ORDER BY created_at DESC").fetchall()
     return render_template("admin.html",
         vpses=vpses, users=users, broadcast=bc, host=host,
         config=cfg, nat_rules=nat_rules,
-        max_vps=MAX_VPS_PER_NODE,
+        max_vps=get_max_vps_per_node(),
         queue_length=queue.queue_length(),
         host_kvm=kvm_available(),
         node_code=node_mesh.NODE_CODE,
         node_url=node_mesh.get_node_url(),
         public_ip=nat.get_public_ip(),
+        banned_ips=banned_ips,
     )
 
 @app.route("/admin/config", methods=["POST"])
@@ -837,7 +873,7 @@ def admin():
 def admin_update_config():
     if not current_user.is_admin: return "Forbidden", 403
     db = get_db()
-    for key in ("vps_cpu_cores","vps_ram_gb","vps_disk_gb"):
+    for key in ("vps_cpu_cores","vps_ram_gb","vps_disk_gb","vps_max_per_node"):
         val = request.form.get(key,"").strip()
         if val.isdigit() and int(val) > 0:
             db.execute("INSERT INTO panel_config(key,value) VALUES(?,?) "
@@ -925,6 +961,93 @@ def admin_vps_action(vps_id, action):
     db.commit()
     return redirect(url_for("admin"))
 
+
+# ── User & IP management ──────────────────────────────────────────────────────
+
+@app.route("/admin/user/<int:user_id>/suspend", methods=["POST"])
+@login_required
+def admin_user_suspend(user_id):
+    if not current_user.is_admin: return "Forbidden", 403
+    reason = request.form.get("reason", "").strip()[:200]
+    db = get_db()
+    db.execute("UPDATE users SET is_suspended=1, suspended_reason=?, suspended_at=? WHERE id=?",
+               (reason or "Suspended by admin", int(time.time()), user_id))
+    for v in db.execute("SELECT container_id FROM vps WHERE user_id=?", (user_id,)).fetchall():
+        try: suspend_vps(v["container_id"])
+        except Exception: pass
+    db.execute("UPDATE vps SET status='suspended' WHERE user_id=?", (user_id,))
+    db.commit()
+    flash("User suspended")
+    return redirect(url_for("admin"))
+
+@app.route("/admin/user/<int:user_id>/unsuspend", methods=["POST"])
+@login_required
+def admin_user_unsuspend(user_id):
+    if not current_user.is_admin: return "Forbidden", 403
+    db = get_db()
+    db.execute("UPDATE users SET is_suspended=0, suspended_reason=NULL, suspended_at=NULL WHERE id=?", (user_id,))
+    for v in db.execute("SELECT container_id FROM vps WHERE user_id=?", (user_id,)).fetchall():
+        try: unsuspend_vps(v["container_id"])
+        except Exception: pass
+    db.execute("UPDATE vps SET status='running' WHERE user_id=? AND status='suspended'", (user_id,))
+    db.commit()
+    flash("User unsuspended")
+    return redirect(url_for("admin"))
+
+@app.route("/admin/user/<int:user_id>/delete", methods=["POST"])
+@login_required
+def admin_user_delete(user_id):
+    if not current_user.is_admin: return "Forbidden", 403
+    if user_id == current_user.id:
+        flash("Cannot delete yourself"); return redirect(url_for("admin"))
+    db = get_db()
+    for v in db.execute("SELECT id,container_id FROM vps WHERE user_id=?", (user_id,)).fetchall():
+        try: nat.deprovision_nat(db, v["id"])
+        except Exception: pass
+        try: destroy_vps(v["container_id"])
+        except Exception: pass
+    db.execute("DELETE FROM vps WHERE user_id=?", (user_id,))
+    db.execute("DELETE FROM feedback WHERE user_id=?", (user_id,))
+    db.execute("DELETE FROM users WHERE id=?", (user_id,))
+    db.commit()
+    flash("User deleted")
+    return redirect(url_for("admin"))
+
+@app.route("/admin/user/<int:user_id>/reset_password", methods=["POST"])
+@login_required
+def admin_user_reset_password(user_id):
+    if not current_user.is_admin: return "Forbidden", 403
+    new_pw = generate_password()
+    db = get_db()
+    db.execute("UPDATE users SET password=? WHERE id=?", (generate_password_hash(new_pw), user_id))
+    db.commit()
+    flash(f"New password for user: {new_pw}")
+    return redirect(url_for("admin"))
+
+@app.route("/admin/ip/ban", methods=["POST"])
+@login_required
+def admin_ip_ban():
+    if not current_user.is_admin: return "Forbidden", 403
+    ip = request.form.get("ip", "").strip()
+    reason = request.form.get("reason", "").strip()[:200]
+    if not ip:
+        flash("IP required"); return redirect(url_for("admin"))
+    db = get_db()
+    db.execute("INSERT OR IGNORE INTO banned_ips(ip,reason,created_at,banned_by) VALUES(?,?,?,?)",
+               (ip, reason or "Banned by admin", int(time.time()), current_user.id))
+    db.commit()
+    flash(f"Banned {ip}")
+    return redirect(url_for("admin"))
+
+@app.route("/admin/ip/unban/<int:ban_id>", methods=["POST"])
+@login_required
+def admin_ip_unban(ban_id):
+    if not current_user.is_admin: return "Forbidden", 403
+    db = get_db()
+    db.execute("DELETE FROM banned_ips WHERE id=?", (ban_id,))
+    db.commit()
+    flash("IP unbanned")
+    return redirect(url_for("admin"))
 
 # ── Nodes ─────────────────────────────────────────────────────────────────────
 

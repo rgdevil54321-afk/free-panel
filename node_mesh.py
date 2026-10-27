@@ -32,6 +32,16 @@ import requests
 
 MAX_VPS_PER_NODE = 150
 
+def get_max_vps_per_node():
+    try:
+        import sqlite3
+        db = sqlite3.connect("panel.db")
+        row = db.execute("SELECT value FROM panel_config WHERE key='vps_max_per_node'").fetchone()
+        db.close()
+        return int(row[0]) if row else MAX_VPS_PER_NODE
+    except Exception:
+        return MAX_VPS_PER_NODE
+
 NODE_CODE = f"{secrets.randbelow(100_000_000):08d}"
 
 _detected_url: str = ""
@@ -327,7 +337,7 @@ def get_peer_for_overflow(db) -> tuple:
         "SELECT url, shared_secret FROM nodes "
         "WHERE last_seen > ? AND vps_count < ? "
         "ORDER BY vps_count ASC LIMIT 1",
-        (cutoff, MAX_VPS_PER_NODE)
+        (cutoff, get_max_vps_per_node())
     ).fetchone()
     if row:
         return row["url"], row["shared_secret"]

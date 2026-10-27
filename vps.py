@@ -173,9 +173,15 @@ def count_all_vps() -> int:
     return sum(1 for inst in client.instances.all() if inst.name.startswith("vps-"))
 
 
+def get_max_vps_per_node():
+    try:
+        return int(_get_config("vps_max_per_node", "150"))
+    except Exception:
+        return 150
+
 def can_create_vps():
     current = count_all_vps()
-    return current < MAX_VPS_PER_NODE, current
+    return current < get_max_vps_per_node(), current
 
 
 # ── low-level helpers ───────────────────────────────────────────────────────
