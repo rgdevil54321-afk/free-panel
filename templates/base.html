@@ -411,9 +411,7 @@
     Deup<span class="accent">G</span>aming
   </a>
   <div class="nav-links">
-    {% if not current_user.is_admin %}
     <a href="{{ url_for('dashboard') }}" class="{{ 'active' if request.endpoint == 'dashboard' }}">Dashboard</a>
-    {% endif %}
     {% if current_user.is_admin %}
     <a href="{{ url_for('admin') }}" class="{{ 'active' if request.endpoint == 'admin' }}">Admin</a>
     <a href="{{ url_for('admin_nodes') }}" class="{{ 'active' if request.endpoint == 'admin_nodes' }}">Nodes</a>

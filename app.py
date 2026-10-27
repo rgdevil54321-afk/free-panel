@@ -339,12 +339,9 @@ def delete_account():
 @login_required
 def dashboard():
     db      = get_db()
-    if current_user.is_admin:
-        all_vps = db.execute("SELECT * FROM vps ORDER BY created_at ASC").fetchall()
-    else:
-        all_vps = db.execute(
-            "SELECT * FROM vps WHERE user_id=? ORDER BY created_at ASC", (current_user.id,)
-        ).fetchall()
+    all_vps = db.execute(
+        "SELECT * FROM vps WHERE user_id=? ORDER BY created_at ASC", (current_user.id,)
+    ).fetchall()
     selected_id = request.args.get("vps_id", type=int)
     vps = None
     if selected_id:
@@ -355,11 +352,8 @@ def dashboard():
                 all_vps = [vps] + [x for x in all_vps if x["id"] != selected_id]
     if selected_id and not vps and not current_user.is_admin:
         flash("VPS not found"); return redirect(url_for("dashboard"))
-    if not vps and all_vps and not current_user.is_admin:
+    if not vps and all_vps:
         vps = all_vps[0]
-    # admins without an explicit VPS go to the admin panel instead of someone's VPS
-    if current_user.is_admin and not selected_id:
-        return redirect(url_for("admin"))
 
     if vps and vps["status"] in ("running","stopped"):
         real = sync_status(vps["container_id"], vps["status"])
