@@ -14,6 +14,7 @@ Changes from v1:
 
 import os
 import re
+import shlex
 import time
 import shutil
 import sqlite3
@@ -866,15 +867,25 @@ def handle_high_cpu(container_id: str, threshold: float = 90.0) -> dict:
 
 # ── file manager ────────────────────────────────────────────────────────────
 
+def _safe_path(path: str) -> str:
+    # Block path traversal segments
+    if not path:
+        return path
+    parts = path.replace("\\", "/").split("/")
+    if ".." in parts:
+        raise ValueError("Path traversal not allowed")
+    return path
+
 def list_files(container_id: str, path: str = "/root") -> list[dict]:
     """Returns a list of file/dir entries at the given path inside the container."""
+    _safe_path(path)
     inst = _get_container(container_id)
     if not inst:
         raise RuntimeError("Container not found")
 
     # Use stat for a reliable machine-parseable listing
     cmd = (
-        f"ls -la --time-style=+%s {path} 2>&1 | tail -n +2"
+        f"ls -la --time-style=+%s {shlex.quote(path)} 2>&1 | tail -n +2"
     )
     result = _exec(inst, ["bash", "-c", cmd])
     lines  = (result.stdout or "").strip().splitlines()
@@ -903,10 +914,11 @@ def list_files(container_id: str, path: str = "/root") -> list[dict]:
 
 def read_file_b64(container_id: str, path: str) -> str:
     """Returns file contents as a base64 string (safe for JSON transport)."""
+    _safe_path(path)
     inst = _get_container(container_id)
     if not inst:
         raise RuntimeError("Container not found")
-    result = _exec(inst, ["bash", "-c", f"base64 -w0 {path} 2>&1"])
+    result = _exec(inst, ["bash", "-c", f"base64 -w0 {shlex.quote(path)} 2>&1"])
     if result.exit_code != 0:
         raise RuntimeError(result.stdout or "Read failed")
     return (result.stdout or "").strip()
@@ -914,11 +926,12 @@ def read_file_b64(container_id: str, path: str) -> str:
 
 def write_file_b64(container_id: str, path: str, b64_content: str):
     """Writes base64-encoded content to a file inside the container."""
+    _safe_path(path)
     inst = _get_container(container_id)
     if not inst:
         raise RuntimeError("Container not found")
     # Pipe through base64 decode — avoids shell escaping the raw content
-    cmd = f"echo '{b64_content}' | base64 -d > {path}"
+    cmd = f"echo '{b64_content}' | base64 -d > {shlex.quote(path)}"
     result = _exec(inst, ["bash", "-c", cmd])
     if result.exit_code != 0:
         raise RuntimeError(result.stdout or "Write failed")
@@ -926,6 +939,7 @@ def write_file_b64(container_id: str, path: str, b64_content: str):
 
 def delete_file(container_id: str, path: str):
     """Deletes a file or directory (recursive) inside the container."""
+    _safe_path(path)
     inst = _get_container(container_id)
     if not inst:
         raise RuntimeError("Container not found")
@@ -933,17 +947,18 @@ def delete_file(container_id: str, path: str):
     dangerous = ["/", "/etc", "/usr", "/bin", "/sbin", "/lib", "/lib64", "/proc", "/sys"]
     if path.rstrip("/") in dangerous:
         raise RuntimeError("Refusing to delete protected path")
-    result = _exec(inst, ["bash", "-c", f"rm -rf {path}"])
+    result = _exec(inst, ["bash", "-c", f"rm -rf {shlex.quote(path)}"])
     if result.exit_code != 0:
         raise RuntimeError(result.stdout or "Delete failed")
 
 
 def create_directory(container_id: str, path: str):
     """Creates a directory inside the container."""
+    _safe_path(path)
     inst = _get_container(container_id)
     if not inst:
         raise RuntimeError("Container not found")
-    result = _exec(inst, ["bash", "-c", f"mkdir -p {path}"])
+    result = _exec(inst, ["bash", "-c", f"mkdir -p {shlex.quote(path)}"])
     if result.exit_code != 0:
         raise RuntimeError(result.stdout or "mkdir failed")
 

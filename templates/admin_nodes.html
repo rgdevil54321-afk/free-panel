@@ -187,7 +187,7 @@ function showBootLog(nodeId, nodeUrl){
   function poll(){
     fetch('/api/node/bootstrap_status?url='+encodeURIComponent(nodeUrl))
       .then(r=>r.json()).then(d=>{
-        box.innerHTML = d.logs.map(l=>`<div>${l}</div>`).join('');
+        box.innerHTML = d.logs.map(l=>`<div>${l.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}</div>`).join('');
         box.scrollTop = box.scrollHeight;
         if(!d.done) setTimeout(poll, 2000);
         else box.innerHTML += '<div style="color:var(--accent);margin-top:.4rem;">— Done —</div>';

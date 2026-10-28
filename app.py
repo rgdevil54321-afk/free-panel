@@ -37,7 +37,8 @@ import nat
 DB = "panel.db"
 
 app = Flask(__name__)
-app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
+if os.environ.get("TRUST_PROXY"):
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
 SECRET_KEY_FILE = "secret.key"
 if os.environ.get("FLASK_SECRET_KEY"):
