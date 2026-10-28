@@ -36,6 +36,10 @@ def is_vpn_or_proxy(ip: str) -> tuple[bool, str | None]:
     Returns (is_vpn: bool, label: str | None).
     label is a short human-readable reason for the admin panel.
     """
+    import os
+    # Privacy: never send user IPs to external services unless explicitly enabled.
+    if not os.environ.get("IP_INTEL_ENABLED"):
+        return False, None
     if not ip or ip in ("127.0.0.1", "::1"):
         return False, None
 

@@ -199,10 +199,12 @@ def inject_globals():
     db  = get_db()
     row = db.execute("SELECT message,active FROM broadcast WHERE id=1").fetchone()
     db.close()
+    from flask_login import current_user
+    is_admin = getattr(current_user, "is_admin", False) if current_user.is_authenticated else False
     return dict(
         broadcast_message=(row["message"] if row and row["active"] and row["message"] else None),
         node_url=node_mesh.get_node_url(),
-        node_code=node_mesh.NODE_CODE,
+        node_code=(node_mesh.NODE_CODE if is_admin else None),
         kvm_available=kvm_available(),
         public_ip=nat.get_public_ip(),
     )
