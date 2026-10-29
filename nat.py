@@ -30,6 +30,15 @@ EXTRA_PORTS_PER_VPS = 5
 
 DB = "panel.db"
 
+
+def _chroot_mode() -> bool:
+    """True when vps.py runs the chroot backend (no per-VPS netns/iptables)."""
+    try:
+        import vps
+        return getattr(vps, "BACKEND", "chroot") == "chroot"
+    except Exception:
+        return True
+
 # ── Public IP detection ──────────────────────────────────────────────────────
 
 _cached_public_ip: str = ""
@@ -154,6 +163,8 @@ def _ensure_ip_forward():
 
 def _get_container_ip(container_id: str) -> str:
     """Gets the LXC container's IPv4 on eth0 (falls back to first IPv4)."""
+    if _chroot_mode():
+        return ""
     try:
         result = subprocess.run(
             ["lxc", "list", container_id, "--format=csv", "--columns=4"],
@@ -201,6 +212,9 @@ def add_nat_rules(container_id: str, container_ip: str,
     Adds iptables DNAT rules for SSH (tcp) and extra ports (tcp + udp).
     Idempotent — checks before adding.
     """
+    if _chroot_mode():
+        # chroot VPSes bind the host ports directly; nothing to forward.
+        return
     _ensure_ip_forward()
 
     _add_port("tcp", ssh_port, container_ip, 22)
@@ -219,6 +233,8 @@ def add_nat_rules(container_id: str, container_ip: str,
 
 def remove_nat_rules(container_ip: str, ssh_port: int, extra_ports: list[int]):
     """Removes all iptables rules for a container (every duplicate copy)."""
+    if _chroot_mode():
+        return
     _del_port("tcp", ssh_port, container_ip, 22)
     for port in extra_ports:
         _del_port("tcp", port, container_ip, port)
@@ -241,6 +257,17 @@ def refresh_nat_rules(db, vps_id: int, wait_tries: int = 1):
     if not row:
         return None
     extra = [int(p) for p in row["extra_ports"].split(",") if p.strip().isdigit()]
+
+    if _chroot_mode():
+        # Make sure the jailed sshd is listening on the recorded public port.
+        try:
+            import vps
+            res = vps.attach_ssh_port(row["container_id"], int(row["ssh_port"]))
+            if not res.get("ok"):
+                print(f"[NAT] could not start sshd for {row['container_id']}: {res.get('error')}")
+        except Exception as e:
+            print(f"[NAT] chroot sshd refresh failed for {row['container_id']}: {e}")
+        return row["container_ip"]
 
     new_ip = ""
     for i in range(max(1, wait_tries)):
@@ -273,6 +300,29 @@ def provision_nat(db, vps_id: int, container_id: str) -> dict:
     writes DB row, installs iptables rules.
     Returns {"ssh_port": N, "extra_ports": [...], "container_ip": "...", "public_ip": "..."}
     """
+    if _chroot_mode():
+        ssh_port = _next_ssh_port(db)
+        extra_ports = _next_extra_ports(db)
+        container_ip = "127.0.0.1"     # informational only
+        db.execute(
+            "INSERT INTO nat_rules(vps_id, container_id, container_ip, ssh_port, "
+            "extra_ports, created_at) VALUES(?,?,?,?,?,?)",
+            (vps_id, container_id, container_ip, ssh_port,
+             ",".join(str(p) for p in extra_ports), int(time.time()))
+        )
+        db.commit()
+        try:
+            import vps
+            vps.attach_ssh_port(container_id, ssh_port)
+        except Exception as e:
+            print(f"[NAT] could not start sshd for {container_id}: {e}")
+        return {
+            "ssh_port": ssh_port,
+            "extra_ports": extra_ports,
+            "container_ip": container_ip,
+            "public_ip": get_public_ip(),
+        }
+
     # Wait up to 30s for the container to get an IP
     container_ip = ""
     for _ in range(15):
@@ -313,6 +363,10 @@ def deprovision_nat(db, vps_id: int):
     row = get_nat_rule(db, vps_id)
     if not row:
         return
+    if _chroot_mode():
+        db.execute("DELETE FROM nat_rules WHERE vps_id=?", (vps_id,))
+        db.commit()
+        return
     extra_ports = [int(p) for p in row["extra_ports"].split(",") if p.strip().isdigit()]
     remove_nat_rules(row["container_ip"], row["ssh_port"], extra_ports)
     db.execute("DELETE FROM nat_rules WHERE vps_id=?", (vps_id,))
@@ -325,6 +379,17 @@ def reapply_all_rules(db):
     iptables rules don't survive reboots by default, and container IPs
     can change, so each rule set is refreshed against the live IP.
     """
+    if _chroot_mode():
+        rows = db.execute("SELECT vps_id FROM nat_rules").fetchall()
+        if not rows:
+            return
+        print(f"[NAT] Restarting {len(rows)} chroot sshd instances...")
+        for row in rows:
+            try:
+                refresh_nat_rules(db, row["vps_id"], wait_tries=1)
+            except Exception as e:
+                print(f"[NAT] reapply failed for vps {row['vps_id']}: {e}")
+        return
     _ensure_ip_forward()
     rows = db.execute("SELECT vps_id FROM nat_rules").fetchall()
     if not rows:
