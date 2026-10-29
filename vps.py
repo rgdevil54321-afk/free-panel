@@ -288,6 +288,24 @@ def _mkdir_devices(root: str):
     except Exception:
         pass
 
+    # /dev/fd, /dev/stdin, /dev/stdout, /dev/stderr -- needed for process
+    # substitution (bash <(curl ...)), here-docs and piped installers.
+    # These are symlinks into /proc, which must be mounted at runtime.
+    fd_links = {
+        "fd":     "/proc/self/fd",
+        "stdin":  "/proc/self/fd/0",
+        "stdout": "/proc/self/fd/1",
+        "stderr": "/proc/self/fd/2",
+    }
+    for name, target in fd_links.items():
+        p = os.path.join(devdir, name)
+        if os.path.lexists(p):
+            continue
+        try:
+            os.symlink(target, p)
+        except Exception:
+            pass
+
 
 def _prepare_runtime(name: str) -> dict:
     """Mount /proc and a PTY-capable /dev/pts inside the jail (best effort)."""
@@ -297,6 +315,7 @@ def _prepare_runtime(name: str) -> dict:
             os.makedirs(os.path.join(root, sub), exist_ok=True)
         except Exception:
             pass
+    _mkdir_devices(root)
     _mkdir_devices(root)
 
     pts_ok = _mount_bind("/dev/pts", os.path.join(root, "dev", "pts"))
