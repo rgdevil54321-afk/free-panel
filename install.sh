@@ -365,6 +365,9 @@ VPS_BACKEND=chroot
 VPS_CHROOT_ROOT=$CHROOT_ROOT
 PANEL_PORT=$port
 PANEL_HOST=0.0.0.0
+# Anti-abuse: set to 1 to block multiple VPSes from the same IP (breaks
+# behind NAT / shared hosting / Cloudflare). Default off.
+# IP_ABUSE_CHECK_ENABLED=1
 # Never enable external IP lookups unless you explicitly want them:
 # IP_INTEL_ENABLED=1
 EOF

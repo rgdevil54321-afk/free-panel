@@ -412,18 +412,23 @@ def vps_create():
         flash("This IP is banned."); return redirect(url_for("dashboard"))
     if db.execute("SELECT 1 FROM vps WHERE user_id=?", (current_user.id,)).fetchone():
         flash("You already have a VPS."); return redirect(url_for("dashboard"))
-    if db.execute("SELECT 1 FROM vps WHERE creator_ip=?", (ip,)).fetchone():
-        flash("This IP already has a VPS."); return redirect(url_for("dashboard"))
-    user_row = db.execute("SELECT signup_ip FROM users WHERE id=?", (current_user.id,)).fetchone()
-    if db.execute("SELECT 1 FROM vps WHERE creator_ip=?", (user_row["signup_ip"],)).fetchone():
-        flash("Your signup IP already has a VPS."); return redirect(url_for("dashboard"))
+    # IP-based anti-abuse is optional: behind a NAT (shared hosting, Cloudflare
+    # tunnel, corporate proxy) every user appears to come from one IP, so
+    # enforcing it blocks everyone. Default off; set IP_ABUSE_CHECK_ENABLED=1
+    # to re-enable for production single-IP-per-user deployments.
+    if os.environ.get("IP_ABUSE_CHECK_ENABLED", "0") == "1":
+        if db.execute("SELECT 1 FROM vps WHERE creator_ip=?", (ip,)).fetchone():
+            flash("This IP already has a VPS."); return redirect(url_for("dashboard"))
+        user_row = db.execute("SELECT signup_ip FROM users WHERE id=?", (current_user.id,)).fetchone()
+        if db.execute("SELECT 1 FROM vps WHERE creator_ip=?", (user_row["signup_ip"],)).fetchone():
+            flash("Your signup IP already has a VPS."); return redirect(url_for("dashboard"))
 
     is_vpn, vpn_label = ip_intel.is_vpn_or_proxy(ip)
-    if is_vpn:
+    if is_vpn and os.environ.get("IP_INTEL_ENABLED", "0") == "1":
         flash(f"VPN/proxy detected ({vpn_label}) - disable it and try again."); return redirect(url_for("dashboard"))
 
     found_elsewhere, other_url = node_mesh.check_ip_across_mesh(db, ip)
-    if found_elsewhere:
+    if found_elsewhere and os.environ.get("IP_ABUSE_CHECK_ENABLED", "0") == "1":
         flash(f"This IP already has a VPS on another node ({other_url})."); return redirect(url_for("dashboard"))
 
     allowed, current_count = can_create_vps()
@@ -626,7 +631,25 @@ def vps_dismiss(vps_id):
     db.execute("DELETE FROM vps WHERE id=?", (vps_id,)); db.commit()
     return redirect(url_for("dashboard"))
 
-@app.route("/vps/<int:vps_id>/regen_ssh", methods=["POST"])
+@app.route("/vps/<int:vps_id>/delete", methods=["POST"])
+@login_required
+def vps_delete(vps_id):
+    db = get_db()
+    vps = db.execute("SELECT * FROM vps WHERE id=?", (vps_id,)).fetchone()
+    if not vps or (vps["user_id"] != current_user.id and not current_user.is_admin):
+        flash("Not found"); return redirect(url_for("dashboard"))
+    try:
+        nat.deprovision_nat(db, vps_id)
+    except Exception:
+        pass
+    try:
+        destroy_vps(vps["container_id"])
+    except Exception:
+        pass
+    db.execute("DELETE FROM vps WHERE id=?", (vps_id,))
+    db.commit()
+    flash("VPS deleted")
+    return redirect(url_for("dashboard"))
 @login_required
 def regen_ssh(vps_id):
     db  = get_db()

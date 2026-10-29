@@ -110,6 +110,7 @@ Other flags: `--reinstall`, `--update`, `--start`, `--stop`, `--restart`,
 | `VPS_CHROOT_ROOT` | `/var/lib/deup-vps` | backend data directory |
 | `VPS_BACKEND` | `chroot` | backend selector |
 | `MIN_FREE_DISK_GB` | `5` | host disk reserve before refusing new VPS |
+| `IP_ABUSE_CHECK_ENABLED` | unset (off) | block multiple VPSes from one IP (breaks behind NAT/shared hosting) |
 | `IP_INTEL_ENABLED` | unset | enables external IP lookups |
 
 ## Requirements

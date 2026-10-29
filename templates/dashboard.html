@@ -310,6 +310,10 @@
             onsubmit="return confirm('Reinstall wipes all data. Continue?')">
         <button class="btn btn-warn btn-sm">&#8635; Reinstall</button>
       </form>
+      <form method="post" action="{{ url_for('vps_delete', vps_id=vps.id) }}"
+            onsubmit="return confirm('Delete this VPS permanently? This cannot be undone.')">
+        <button class="btn btn-ghost btn-sm" style="color:var(--danger);">&#128465; Delete</button>
+      </form>
       <a href="{{ url_for('file_manager', vps_id=vps.id) }}" class="btn btn-ghost btn-sm">&#128193; Files</a>
     </div>
   </div>
