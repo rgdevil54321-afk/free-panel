@@ -931,7 +931,7 @@ fi
 
 if [ "$(id -u)" -ne 0 ]; then
   if have sudo; then
-    exec sudo -E bash "$0" "$@"
+    exec sudo -E bash "$REPO_DIR/install.sh" "$@"
   else
     err "run as root"
     exit 1
