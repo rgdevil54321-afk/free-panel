@@ -1254,4 +1254,7 @@ if __name__ == "__main__":
     print("="*55)
     start_monitor()
     queue.start_queue_worker(_build_vps)
-    app.run(host="0.0.0.0", port=5000, threaded=True)
+    _host = os.environ.get("PANEL_HOST", "0.0.0.0")
+    _port = int(os.environ.get("PANEL_PORT", "5000"))
+    print(f"  Panel URL : http://{_host}:{_port}")
+    app.run(host=_host, port=_port, threaded=True)
