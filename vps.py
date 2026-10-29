@@ -1075,6 +1075,14 @@ def create_vps_container(
     except Exception as e:
         print(f"[BRAND] {e}")
 
+    # Give sshx a PTY inside the jail before it starts: sshx allocates
+    # /dev/pts for the shell it spawns.  Best-effort — if mount is blocked
+    # on the host, sshx still runs but with no interactive terminal.
+    try:
+        _prepare_runtime(cid)
+    except Exception as e:
+        print(f"[vps] runtime mount for sshx failed on {cid}: {e}")
+
     # sshx browser terminal (optional; panel terminal is the fallback)
     sshx_ready = False
     for attempt in range(3):
