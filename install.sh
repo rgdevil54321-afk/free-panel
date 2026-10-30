@@ -595,11 +595,26 @@ setup_cloudflare() {
     echo ""
     echo -e "  ${DIM}Get the token from Cloudflare Zero Trust -> Networks -> Tunnels ->${NC}"
     echo -e "  ${DIM}your tunnel -> Configure -> token (starts with eyJ...).${NC}"
+    echo -e "  ${DIM}You can paste the full command 'sudo cloudflared service install eyJ...'${NC}"
+    echo -e "  ${DIM}or just the token itself.${NC}"
     echo ""
     read -rp "  Tunnel token (paste, or Enter to skip): " token
   fi
+
+  # Strip common prefixes if user pasted a full command
+  token="${token#sudo cloudflared service install }"
+  token="${token#cloudflared service install }"
+  token="${token#sudo }"
+  token="$(echo "$token" | tr -d '[:space:]')"
+
+  # Validate: token should start with eyJ (JWT)
   if [ -z "$token" ]; then
     warn "No token provided - skipping Cloudflare setup"
+    return 1
+  fi
+  if [[ ! "$token" =~ ^eyJ ]]; then
+    warn "Token doesn't look like a valid Cloudflare token (should start with eyJ...)"
+    warn "Make sure you copied just the token, not the full command"
     return 1
   fi
 
@@ -703,6 +718,8 @@ EOF
   done
 
   warn "Cloudflared did not start - check: journalctl -u cloudflared -n 30"
+  echo -e "  ${DIM}Last 10 lines of cloudflared log:${NC}"
+  journalctl -u cloudflared -n 10 --no-pager 2>/dev/null || true
   return 1
 }
 
