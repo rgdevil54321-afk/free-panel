@@ -37,6 +37,7 @@ You get a menu:
 11) Backup now   12) Restore backup
 13) Uninstall panel
 14) Open shell in panel directory
+15) Connect Cloudflare Tunnel
 ```
 
 Pick `1`, enter a username and password (or leave the password blank to
@@ -110,6 +111,7 @@ Other flags: `--reinstall`, `--update`, `--start`, `--stop`, `--restart`,
 | `VPS_CHROOT_ROOT` | `/var/lib/deup-vps` | backend data directory |
 | `VPS_BACKEND` | `chroot` | backend selector |
 | `MIN_FREE_DISK_GB` | `5` | host disk reserve before refusing new VPS |
+| `CLOUDFLARE_TOKEN` | unset | tunnel token for unattended `--cloudflare` setup |
 | `IP_ABUSE_CHECK_ENABLED` | unset (off) | block multiple VPSes from one IP (breaks behind NAT/shared hosting) |
 | `IP_INTEL_ENABLED` | unset | enables external IP lookups |
 

@@ -584,6 +584,128 @@ repair_panel() {
   return 1
 }
 
+# ---------------- cloudflare tunnel ----------------
+setup_cloudflare() {
+  need_root
+  banner
+  info "Cloudflare Tunnel setup (ingress to the panel on port $(panel_port))"
+
+  local token="${CLOUDFLARE_TOKEN:-}"
+  if [ -z "$token" ] && [ -t 0 ]; then
+    echo ""
+    echo -e "  ${DIM}Get the token from Cloudflare Zero Trust -> Networks -> Tunnels ->${NC}"
+    echo -e "  ${DIM}your tunnel -> Configure -> token (starts with eyJ...).${NC}"
+    echo ""
+    read -rp "  Tunnel token (paste, or Enter to skip): " token
+  fi
+  if [ -z "$token" ]; then
+    warn "No token provided - skipping Cloudflare setup"
+    return 1
+  fi
+
+  # --- install cloudflared if missing ---
+  if ! have cloudflared; then
+    info "Installing cloudflared"
+    if have apt-get; then
+      if ! apt_install cloudflared >/dev/null 2>&1; then
+        local arch url tmpbin
+        arch="$(uname -m)"
+        case "$arch" in
+          x86_64|amd64) arch="amd64" ;;
+          aarch64|arm64) arch="arm64" ;;
+          armv7l|armhf)  arch="arm" ;;
+          *) arch="amd64" ;;
+        esac
+        url="https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${arch}"
+        tmpbin="/tmp/cloudflared.$$"
+        if retry 3 curl -fsSL "$url" -o "$tmpbin"; then
+          chmod +x "$tmpbin"
+          mv "$tmpbin" /usr/local/bin/cloudflared
+          ok "cloudflared installed (binary)"
+        else
+          rm -f "$tmpbin"
+          err "Could not download cloudflared - install it manually and re-run"
+          return 1
+        fi
+      else
+        ok "cloudflared installed (apt)"
+      fi
+    else
+      err "apt-get not found - install cloudflared manually"
+      return 1
+    fi
+  else
+    ok "cloudflared already installed"
+  fi
+
+  # --- store token ---
+  mkdir -p /etc/cloudflared
+  printf '%s' "$token" > /etc/cloudflared/token
+  chmod 600 /etc/cloudflared/token
+  ok "Token stored at /etc/cloudflared/token"
+
+  # --- remove stale units and processes ---
+  info "Cleaning up stale cloudflared units"
+  for u in cloudflared cloudflared-update; do
+    systemctl stop "$u" >/dev/null 2>&1 || true
+    systemctl disable "$u" >/dev/null 2>&1 || true
+  done
+  rm -f /etc/systemd/system/cloudflared.service \
+        /etc/systemd/system/cloudflared-update.service \
+        /lib/systemd/system/cloudflared.service \
+        /lib/systemd/system/cloudflared-update.service
+  pkill -f "cloudflared tunnel" 2>/dev/null || true
+  sleep 1
+
+  # --- create the custom unit (force http2: QUIC/UDP 7844 is blocked on this host) ---
+  local port
+  port="$(panel_port)"
+  local cfd_bin
+  cfd_bin="$(command -v cloudflared)"
+  [ -z "$cfd_bin" ] && cfd_bin="/usr/local/bin/cloudflared"
+
+  cat > /etc/systemd/system/cloudflared.service <<EOF
+[Unit]
+Description=Cloudflare Tunnel (DeupGaming Free Panel)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=root
+ExecStart=${cfd_bin} --no-autoupdate tunnel --protocol http2 run --token-file /etc/cloudflared/token
+Restart=always
+RestartSec=5
+TimeoutStopSec=10
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  systemctl daemon-reload
+  systemctl enable cloudflared >/dev/null 2>&1 || true
+
+  info "Starting cloudflared tunnel"
+  systemctl restart cloudflared 2>/dev/null || systemctl start cloudflared 2>/dev/null
+
+  # --- verify ---
+  local i
+  for i in $(seq 1 20); do
+    if systemctl is-active --quiet cloudflared; then
+      ok "Cloudflare tunnel is running (protocol: http2)"
+      echo ""
+      echo -e "  ${DIM}Make sure your Cloudflare tunnel route points to:${NC}"
+      echo -e "  ${BOLD}http://127.0.0.1:${port}${NC}  ${DIM}(use 127.0.0.1, not localhost)${NC}"
+      echo ""
+      return 0
+    fi
+    sleep 1
+  done
+
+  warn "Cloudflared did not start - check: journalctl -u cloudflared -n 30"
+  return 1
+}
+
 open_firewall() {
   local port
   port="$(panel_port)"
@@ -672,6 +794,18 @@ install_all() {
   if ! wait_http "$port"; then
     warn "Panel did not come up on first try — repairing"
     repair_panel || die "installation failed (see logs above)"
+  fi
+
+  # --- optional Cloudflare Tunnel setup ---
+  if [ -t 0 ]; then
+    echo ""
+    read -rp "  Connect Cloudflare Tunnel now? [y/N]: " cf_ans
+    case "$cf_ans" in y|Y|yes|YES)
+      setup_cloudflare || warn "Cloudflare setup failed - run 'panel' -> 15 later"
+      ;;
+    esac
+  elif [ -n "${CLOUDFLARE_TOKEN:-}" ]; then
+    setup_cloudflare || warn "Cloudflare setup failed"
   fi
 
   show_summary
@@ -917,9 +1051,10 @@ menu() {
     echo -e " ${BOLD}12)${NC} Restore backup"
     echo -e " ${BOLD}13)${NC} Uninstall panel"
     echo -e " ${BOLD}14)${NC} Open shell in panel directory"
+    echo -e " ${BOLD}15)${NC} Connect Cloudflare Tunnel"
     echo -e "  ${BOLD}0)${NC} Exit"
     echo ""
-    if ! read -rp "  Choose [0-14]: " choice; then
+    if ! read -rp "  Choose [0-15]: " choice; then
       echo ""
       exit 0
     fi
@@ -939,6 +1074,7 @@ menu() {
       12) restore_backup ;;
       13) uninstall_panel ;;
       14) open_shell ;;
+      15) setup_cloudflare ;;
       0) echo "  Bye."; exit 0 ;;
       *) err "Invalid choice" ;;
     esac
@@ -965,6 +1101,7 @@ DeupGaming Free Panel — Management Suite
   bash install.sh --reset-admin    reset admin password
   bash install.sh --port N         change panel port
   bash install.sh --uninstall [--purge]
+  bash install.sh --cloudflare     connect Cloudflare Tunnel
   bash install.sh --help
 
 Environment (for unattended installs):
@@ -1003,6 +1140,7 @@ case "$ARG" in
   --reset-admin) reset_admin_password ;;
   --port) PANEL_PORT="${2:-}"; change_port ;;
   --uninstall) uninstall_panel "${2:-}" ;;
+  --cloudflare) setup_cloudflare ;;
   --help|-h) usage ;;
   *) err "Unknown option: $ARG"; echo ""; usage; exit 1 ;;
 esac
