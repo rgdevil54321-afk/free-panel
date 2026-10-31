@@ -579,20 +579,21 @@ def _install_openssh_in_chroot(root: str) -> bool:
     os.chmod(os.path.join(root, "usr", "sbin", "policy-rc.d"), 0o755)
     _mkdir_devices(root)
 
-    # make sure apt has usable sources
-    src_dir = os.path.join(root, "etc", "apt")
-    os.makedirs(src_dir, exist_ok=True)
-    src_file = os.path.join(src_dir, "sources.list")
-    has_sources = os.path.isfile(src_file) and os.path.getsize(src_file) > 10
-    if not has_sources:
-        with open(src_file, "w") as f:
-            f.write(
-                "deb http://archive.ubuntu.com/ubuntu jammy main restricted universe multiverse\n"
-                "deb http://archive.ubuntu.com/ubuntu jammy-updates main restricted universe multiverse\n"
-                "deb http://archive.ubuntu.com/ubuntu jammy-security main restricted universe multiverse\n"
-            )
+    # mount filesystems inside the chroot so apt-get works
+    mounts = []
+    for fstype, src, dst, opts in [
+        ("proc", "proc", os.path.join(root, "proc"), ""),
+        ("bind", "/dev", os.path.join(root, "dev"), ""),
+        ("devpts", "devpts", os.path.join(root, "dev", "pts"), "newinstance,ptmxmode=0666,mode=0620"),
+    ]:
+        ok = False
+        if fstype == "bind":
+            ok = _mount_bind(src, dst)
+        else:
+            ok = _mount_fs(fstype, src, dst, opts)
+        if ok:
+            mounts.append(dst)
 
-    mounted = _mount_fs("proc", "proc", os.path.join(root, "proc"))
     try:
         steps = [
             "export DEBIAN_FRONTEND=noninteractive",
@@ -605,15 +606,16 @@ def _install_openssh_in_chroot(root: str) -> bool:
                 ["chroot", root, "/bin/bash", "-c", step],
                 capture_output=True, text=True, timeout=900, env=CHROOT_ENV,
             )
+            out = (res.stdout or "") + (res.stderr or "")
             if res.returncode != 0:
-                print(f"[base] {step} failed: {(res.stderr or res.stdout)[-500:]}")
+                print(f"[base] {step} failed (rc={res.returncode}): {out[-600:]}")
                 return False
     except Exception as e:
         print(f"[base] apt inside chroot failed: {e}")
         return False
     finally:
-        if mounted:
-            _umount(os.path.join(root, "proc"))
+        for dst in reversed(mounts):
+            _umount(dst)
     return os.path.isfile(os.path.join(root, "usr", "sbin", "sshd"))
 
 
@@ -794,7 +796,11 @@ def ensure_base_rootfs(verbose: bool = True) -> bool:
             )
         _finalize_base(tmp)
         if base_rootfs_ready_path(tmp):
-            shutil.rmtree(BASE_ROOT, ignore_errors=True)
+            # clean any existing BASE_ROOT (unmount leftover mounts first)
+            if os.path.isdir(BASE_ROOT):
+                for sub in ("proc", "dev/pts", "dev", "sys", "dev/shm"):
+                    _umount(os.path.join(BASE_ROOT, sub))
+                shutil.rmtree(BASE_ROOT, ignore_errors=True)
             os.replace(tmp, BASE_ROOT)
             if verbose:
                 print(f"[base] built at {BASE_ROOT}")
