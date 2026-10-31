@@ -626,6 +626,9 @@ def _build_from_tarball(root: str) -> bool:
         print(f"[base] downloading {url}")
         if not _download(url, tarball, timeout=180):
             return False
+        # force-clean target so a previous failed extract can't conflict
+        shutil.rmtree(root, ignore_errors=True)
+        os.makedirs(root, exist_ok=True)
         res = _run(["tar", "-xzf", tarball, "-C", root], timeout=600)
         if res.returncode != 0:
             print(f"[base] tar failed: {res.stderr[-400:]}")
