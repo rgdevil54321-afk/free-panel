@@ -741,7 +741,7 @@ def ensure_base_rootfs(verbose: bool = True) -> bool:
             print(f"[base] ready: {BASE_ROOT}")
         return True
 
-    tmp = BASE_ROOT + ".tmp"
+    tmp = BASE_ROOT + ".tmp." + secrets.token_hex(4)
     shutil.rmtree(tmp, ignore_errors=True)
     os.makedirs(tmp, exist_ok=True)
 
