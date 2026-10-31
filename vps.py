@@ -796,11 +796,19 @@ def ensure_base_rootfs(verbose: bool = True) -> bool:
             )
         _finalize_base(tmp)
         if base_rootfs_ready_path(tmp):
-            # clean any existing BASE_ROOT (unmount leftover mounts first)
+            # Move any existing BASE_ROOT out of the way (rename works on
+            # non-empty dirs even with /proc /dev mount points underneath,
+            # which rm -rf / os.replace cannot handle).
             if os.path.isdir(BASE_ROOT):
-                for sub in ("proc", "dev/pts", "dev", "sys", "dev/shm"):
-                    _umount(os.path.join(BASE_ROOT, sub))
-                shutil.rmtree(BASE_ROOT, ignore_errors=True)
+                old = BASE_ROOT + ".old." + secrets.token_hex(4)
+                try:
+                    os.rename(BASE_ROOT, old)
+                    # best-effort cleanup of the old dir in background
+                    for sub in ("proc", "dev/pts", "dev", "sys", "dev/shm"):
+                        _umount(os.path.join(old, sub))
+                    shutil.rmtree(old, ignore_errors=True)
+                except Exception:
+                    pass
             os.replace(tmp, BASE_ROOT)
             if verbose:
                 print(f"[base] built at {BASE_ROOT}")
