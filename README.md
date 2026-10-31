@@ -20,7 +20,7 @@ cgroups.
 On a fresh Debian 12 / Ubuntu 22.04+ VPS:
 
 ```bash
-git clone https://github.com/venlixnodes-oss/free-panel-dxd.git
+git clone https://github.com/rgdevil54321-afk/free-panel.git
 cd free-panel-dxd
 bash install.sh
 ```
