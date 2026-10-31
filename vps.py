@@ -597,9 +597,12 @@ def _install_openssh_in_chroot(root: str) -> bool:
     try:
         steps = [
             "export DEBIAN_FRONTEND=noninteractive",
-            "apt-get update -qq",
-            "apt-get install -y -qq --no-install-recommends "
-            "openssh-server ca-certificates curl iproute2 procps less nano",
+            # gpgv is missing in minimal base images; skip repo signature checks
+            "apt-get -o Acquire::AllowInsecureRepositories=true "
+            "-o Acquire::AllowDowngradeToInsecureRepositories=true update -qq",
+            "apt-get -o Acquire::AllowInsecureRepositories=true "
+            "-o Acquire::AllowDowngradeToInsecureRepositories=true install -y -qq "
+            "--no-install-recommends openssh-server ca-certificates curl iproute2 procps less nano",
         ]
         for step in steps:
             res = subprocess.run(
