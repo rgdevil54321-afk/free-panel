@@ -617,6 +617,30 @@ def _install_openssh_in_chroot(root: str) -> bool:
     return os.path.isfile(os.path.join(root, "usr", "sbin", "sshd"))
 
 
+def _extract_tarfile_python(tarball: str, root: str) -> bool:
+    """Extract tarball using Python's tarfile module (userspace).
+
+    Python's tarfile opens destination files with 'wb' (O_CREAT|O_TRUNC,
+    not O_EXCL), so it avoids GNU tar's EEXIST quirk on this container's
+    filesystem where re-creating usr/bin/stat fails with 'File exists'.
+    """
+    import tarfile
+    try:
+        with tarfile.open(tarball, "r:gz") as tf:
+            # Directories first so file parents exist, then everything else.
+            members = sorted(tf.getmembers(), key=lambda m: (not m.isdir(), m.name))
+            for m in members:
+                try:
+                    tf.extract(m, root, set_attrs=True)
+                except Exception as e:
+                    print(f"[base] tarfile: failed to extract {m.name}: {e}")
+                    return False
+    except Exception as e:
+        print(f"[base] python tarfile open failed: {e}")
+        return False
+    return True
+
+
 def _build_from_tarball(root: str) -> bool:
     url = _ubuntu_base_url()
     if not url:
@@ -629,10 +653,21 @@ def _build_from_tarball(root: str) -> bool:
         # force-clean target so a previous failed extract can't conflict
         shutil.rmtree(root, ignore_errors=True)
         os.makedirs(root, exist_ok=True)
-        res = _run(["tar", "-xzf", tarball, "-C", root], timeout=600)
-        if res.returncode != 0:
-            print(f"[base] tar failed: {res.stderr[-400:]}")
-            return False
+
+        # Try Python tarfile first (avoids GNU tar EEXIST quirk on this host)
+        if _extract_tarfile_python(tarball, root):
+            print("[base] tarfile extraction succeeded")
+        else:
+            # Fallback: GNU tar with relaxed ownership/permissions
+            print("[base] tarfile failed, trying GNU tar fallback")
+            res = _run(
+                ["tar", "-xzf", tarball, "-C", root,
+                 "--no-same-owner", "--no-same-permissions", "--delay-directory-restore"],
+                timeout=600,
+            )
+            if res.returncode != 0:
+                print(f"[base] tar failed: {res.stderr[-400:]}")
+                return False
     finally:
         try:
             os.remove(tarball)
