@@ -149,7 +149,7 @@ ensure_system_deps() {
 
   info "Installing system packages"
   install_pkgs ca-certificates curl wget git openssl python3 python3-venv python3-pip \
-               iptables iproute2 net-tools debootstrap openssh-client tar
+               iptables iproute2 net-tools debootstrap openssh-client openssh-server tar
 }
 
 ensure_ip_forward() {

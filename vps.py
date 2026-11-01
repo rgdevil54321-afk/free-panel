@@ -565,11 +565,9 @@ def _ubuntu_base_url() -> str | None:
 def _install_openssh_in_chroot(root: str) -> bool:
     """Install a working sshd inside the chroot.
 
-    Instead of fighting with apt-get inside the chroot (which fails on this
-    container because gpgv is missing and repo signature verification blocks
-    everything), we copy sshd and its shared-library dependencies directly
-    from the host.  The host is Ubuntu 22.04, same as the base image, so the
-    binaries are ABI-compatible.
+    Tries three methods in order:
+      1. Copy sshd + libs from the host (fastest, works if host has openssh-server)
+      2. apt-get install inside the chroot (fallback if host lacks sshd)
     """
     if os.path.isfile(os.path.join(root, "usr", "sbin", "sshd")):
         return True
@@ -588,60 +586,83 @@ def _install_openssh_in_chroot(root: str) -> bool:
     os.chmod(os.path.join(root, "usr", "sbin", "policy-rc.d"), 0o755)
     _mkdir_devices(root)
 
-    # helper: copy a binary + its shared libs into the chroot
-    copied: set = set()
-
-    def copy_binary(src: str) -> bool:
-        if not os.path.isfile(src) or src in copied:
-            return True
-        copied.add(src)
-        dst = os.path.join(root, src.lstrip("/"))
-        try:
-            os.makedirs(os.path.dirname(dst), exist_ok=True)
-            shutil.copy2(src, dst)
-            os.chmod(dst, 0o755)
-        except Exception as e:
-            print(f"[base] could not copy {src}: {e}")
-            return False
-        # copy shared library dependencies
-        try:
-            out = subprocess.run(
-                ["ldd", src], capture_output=True, text=True, timeout=15
-            ).stdout
-        except Exception:
-            return True
-        for line in out.splitlines():
-            line = line.strip()
-            if "=>" not in line:
-                continue
-            parts = line.split("=>")
-            lib_path = parts[1].strip().split(" ")[0]
-            if lib_path and lib_path != "not found" and os.path.isfile(lib_path):
-                copy_binary(lib_path)
-        return True
-
+    # ── Method 1: copy sshd + libs from the host ─────────────────────────
     sshd = "/usr/sbin/sshd"
-    if not os.path.isfile(sshd):
-        print("[base] host /usr/sbin/sshd not found — cannot build chroot sshd")
-        return False
+    if os.path.isfile(sshd):
+        copied: set = set()
 
-    if not copy_binary(sshd):
-        return False
-    # sftp-server is the default Subsystem
-    copy_binary("/usr/lib/openssh/sftp-server")
+        def copy_binary(src: str) -> bool:
+            if not os.path.isfile(src) or src in copied:
+                return True
+            copied.add(src)
+            dst = os.path.join(root, src.lstrip("/"))
+            try:
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
+                shutil.copy2(src, dst)
+                os.chmod(dst, 0o755)
+            except Exception as e:
+                print(f"[base] could not copy {src}: {e}")
+                return False
+            try:
+                out = subprocess.run(
+                    ["ldd", src], capture_output=True, text=True, timeout=15
+                ).stdout
+            except Exception:
+                return True
+            for line in out.splitlines():
+                line = line.strip()
+                if "=>" not in line:
+                    continue
+                parts = line.split("=>")
+                lib_path = parts[1].strip().split(" ")[0]
+                if lib_path and lib_path != "not found" and os.path.isfile(lib_path):
+                    copy_binary(lib_path)
+            return True
 
-    # minimal sshd_config
-    cfgdir = os.path.join(root, "etc", "ssh")
-    os.makedirs(cfgdir, exist_ok=True)
-    with open(os.path.join(cfgdir, "sshd_config"), "w", encoding="utf-8") as f:
-        f.write(_sshd_config(22))
+        if copy_binary(sshd):
+            copy_binary("/usr/lib/openssh/sftp-server")
+            # minimal sshd_config
+            cfgdir = os.path.join(root, "etc", "ssh")
+            os.makedirs(cfgdir, exist_ok=True)
+            with open(os.path.join(cfgdir, "sshd_config"), "w", encoding="utf-8") as f:
+                f.write(_sshd_config(22))
+            os.makedirs(os.path.join(root, "run", "sshd"), exist_ok=True)
+            try:
+                os.chmod(os.path.join(root, "run"), 0o755)
+                os.chmod(os.path.join(root, "run", "sshd"), 0o755)
+            except Exception:
+                pass
+            if os.path.isfile(os.path.join(root, "usr", "sbin", "sshd")):
+                return True
+            print("[base] host sshd copied but sshd binary missing in chroot")
 
-    os.makedirs(os.path.join(root, "run", "sshd"), exist_ok=True)
+    # ── Method 2: apt-get install inside the chroot ──────────────────────
+    print("[base] installing openssh-server inside chroot via apt-get")
     try:
-        os.chmod(os.path.join(root, "run"), 0o755)
-        os.chmod(os.path.join(root, "run", "sshd"), 0o755)
-    except Exception:
-        pass
+        # mount proc so apt works
+        proc_mounted = _mount_fs("proc", "proc", os.path.join(root, "proc"))
+        try:
+            steps = [
+                "export DEBIAN_FRONTEND=noninteractive",
+                "apt-get update -qq",
+                "apt-get install -y -qq --no-install-recommends "
+                "openssh-server ca-certificates curl iproute2 procps less nano",
+            ]
+            for step in steps:
+                res = subprocess.run(
+                    ["chroot", root, "/bin/bash", "-c", step],
+                    capture_output=True, text=True, timeout=900, env=CHROOT_ENV,
+                )
+                if res.returncode != 0:
+                    print(f"[base] {step} failed (rc={res.returncode}): "
+                          f"{(res.stderr or res.stdout)[-500:]}")
+                    return False
+        finally:
+            if proc_mounted:
+                _umount(os.path.join(root, "proc"))
+    except Exception as e:
+        print(f"[base] apt-get inside chroot failed: {e}")
+        return False
 
     return os.path.isfile(os.path.join(root, "usr", "sbin", "sshd"))
 
@@ -1005,7 +1026,10 @@ def _start_sshd(name: str, port: int) -> tuple[bool, str]:
 
     sshd = os.path.join(root, "usr", "sbin", "sshd")
     if not os.path.isfile(sshd):
-        return False, "sshd is missing from the VPS rootfs (base image incomplete)"
+        return False, (
+            f"sshd is missing from the VPS rootfs (base image incomplete). "
+            f"Rebuild the base rootfs: panel -> 3) Update panel"
+        )
 
     # stop a stale daemon first
     _kill_all(name)
@@ -1019,9 +1043,12 @@ def _start_sshd(name: str, port: int) -> tuple[bool, str]:
             log.flush()
             res = subprocess.run(
                 ["chroot", root, "/usr/sbin/sshd", "-p", str(port),
-                 "-o", "PidFile=/run/sshd.pid"],
+                 "-o", "PidFile=/run/sshd.pid",
+                 "-o", "LogLevel=DEBUG3"],
                 stdout=log, stderr=log, timeout=60, env=CHROOT_ENV,
             )
+    except FileNotFoundError:
+        return False, "chroot command not found — is the host missing coreutils?"
     except Exception as e:
         return False, f"sshd launch failed: {e}"
 
@@ -1046,7 +1073,7 @@ def _start_sshd(name: str, port: int) -> tuple[bool, str]:
     tail = ""
     try:
         with open(logpath, "r", errors="replace") as f:
-            tail = "".join(f.readlines()[-6:])
+            tail = "".join(f.readlines()[-10:])
     except Exception:
         pass
     return False, f"sshd did not stay up: {tail.strip()}"
