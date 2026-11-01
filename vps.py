@@ -1649,13 +1649,15 @@ def handle_high_cpu(container_id: str, threshold: float = 90.0) -> dict:
         return {"action": "none", "cpu_percent": stats["cpu_percent"]}
 
     mining = check_for_mining(container_id)
+    # Auto-suspend DISABLED — VPSes stay running even on high CPU / mining suspicion.
+    # Flag for review only; admin can manually suspend from the panel.
     if mining["suspected"] and mining["confidence"] == "high":
-        suspend_vps(container_id)
         return {
-            "action": "suspended",
+            "action": "flagged_for_review",
             "cpu_percent": stats["cpu_percent"],
             "confidence": "high",
             "reasons": mining["reasons"],
+            "note": "Auto-suspend disabled — VPS kept running.",
         }
     if mining["suspected"]:
         return {
