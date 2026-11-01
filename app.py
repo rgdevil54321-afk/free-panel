@@ -37,8 +37,9 @@ import nat
 DB = "panel.db"
 
 app = Flask(__name__)
-if os.environ.get("TRUST_PROXY"):
-    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
+# Panel sits behind Cloudflare Tunnel / reverse proxy — trust X-Forwarded-For
+# so request.remote_addr shows the real client IP (not 127.0.0.1).
+app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
 SECRET_KEY_FILE = "secret.key"
 if os.environ.get("FLASK_SECRET_KEY"):
@@ -901,18 +902,52 @@ def admin():
         banned_ips=banned_ips,
     )
 
+@app.route("/admin/config", methods=["GET"])
+@login_required
+def admin_config():
+    if not current_user.is_admin: return "Forbidden", 403
+    db = get_db()
+    rows = db.execute("SELECT key, value FROM panel_config").fetchall()
+    config = {r["key"]: r["value"] for r in rows}
+    nodes = db.execute("SELECT id, label, url, max_vps, cpu_limit_cores, ram_limit_mb, disk_limit_gb, vps_count FROM nodes ORDER BY id").fetchall()
+    return render_template("admin_config.html", config=config, nodes=nodes,
+                           max_vps=get_max_vps_per_node())
+
+
 @app.route("/admin/config", methods=["POST"])
 @login_required
 def admin_update_config():
     if not current_user.is_admin: return "Forbidden", 403
     db = get_db()
-    for key in ("vps_cpu_cores","vps_ram_gb","vps_disk_gb","vps_max_per_node"):
+    keys = ("vps_cpu_cores","vps_ram_gb","vps_disk_gb","vps_max_per_node",
+            "MIN_FREE_DISK_GB","IP_ABUSE_CHECK_ENABLED","IP_INTEL_ENABLED",
+            "PANEL_PORT","PANEL_HOST")
+    for key in keys:
         val = request.form.get(key,"").strip()
-        if val.isdigit() and int(val) > 0:
+        if val != "":
             db.execute("INSERT INTO panel_config(key,value) VALUES(?,?) "
                        "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, val))
-    db.commit(); flash("Limits updated")
-    return redirect(url_for("admin"))
+    db.commit(); flash("Configuration updated")
+    return redirect(url_for("admin_config"))
+
+
+@app.route("/admin/node/<int:node_id>/limits", methods=["POST"])
+@login_required
+def admin_node_limits(node_id: int):
+    if not current_user.is_admin: return "Forbidden", 403
+    max_vps = request.form.get("max_vps","").strip()
+    cpu = request.form.get("cpu_limit_cores","").strip()
+    ram = request.form.get("ram_limit_mb","").strip()
+    disk = request.form.get("disk_limit_gb","").strip()
+    kwargs = {}
+    if max_vps.isdigit(): kwargs["max_vps"] = int(max_vps)
+    if cpu.isdigit(): kwargs["cpu_limit_cores"] = int(cpu)
+    if ram.isdigit(): kwargs["ram_limit_mb"] = int(ram)
+    if disk.isdigit(): kwargs["disk_limit_gb"] = int(disk)
+    if kwargs:
+        node_mesh.set_node_limits(node_id, **kwargs)
+        flash("Node limits updated")
+    return redirect(url_for("admin_nodes"))
 
 @app.route("/admin/broadcast", methods=["POST"])
 @login_required

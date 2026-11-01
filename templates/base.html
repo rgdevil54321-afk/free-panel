@@ -415,6 +415,7 @@
     {% if current_user.is_admin %}
     <a href="{{ url_for('admin') }}" class="{{ 'active' if request.endpoint == 'admin' }}">Admin</a>
     <a href="{{ url_for('admin_nodes') }}" class="{{ 'active' if request.endpoint == 'admin_nodes' }}">Nodes</a>
+    <a href="{{ url_for('admin_config') }}" class="{{ 'active' if request.endpoint == 'admin_config' }}">Config</a>
     {% endif %}
     <a href="{{ url_for('logout') }}" class="nav-sign-out">Sign out</a>
   </div>

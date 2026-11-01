@@ -1,0 +1,105 @@
+{% extends "base.html" %}
+{% block title %}Config - DeupGaming Admin{% endblock %}
+{% block body %}
+<div class="page">
+  <div class="page-hdr flex-b" style="margin-bottom:1.75rem;">
+    <div>
+      <h1>Panel Configuration</h1>
+      <p>Global limits and feature toggles. Changes apply immediately to new VPS creations.</p>
+    </div>
+    <a href="{{ url_for('admin') }}" class="btn btn-ghost btn-sm">← Back to Admin</a>
+  </div>
+
+  {% with messages = get_flashed_messages() %}
+    {% if messages %}
+      {% for msg in messages %}
+      <div class="alert alert-info">{{ msg }}</div>
+      {% endfor %}
+    {% endif %}
+  {% endwith %}
+
+  <!-- Global panel config -->
+  <div class="card card-sm">
+    <div class="card-title">Global limits</div>
+    <form method="post" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1rem;">
+      <div>
+        <label class="form-label">VPS CPU cores (default)</label>
+        <input name="vps_cpu_cores" class="form-input" value="{{ config.get('vps_cpu_cores','4') }}">
+        <div class="form-help">Default CPU cores assigned to each new VPS.</div>
+      </div>
+      <div>
+        <label class="form-label">VPS RAM GB (default)</label>
+        <input name="vps_ram_gb" class="form-input" value="{{ config.get('vps_ram_gb','4') }}">
+        <div class="form-help">Default RAM in GB assigned to each new VPS.</div>
+      </div>
+      <div>
+        <label class="form-label">VPS Disk GB (default)</label>
+        <input name="vps_disk_gb" class="form-input" value="{{ config.get('vps_disk_gb','80') }}">
+        <div class="form-help">Default disk in GB assigned to each new VPS.</div>
+      </div>
+      <div>
+        <label class="form-label">Max VPS per node (global)</label>
+        <input name="vps_max_per_node" class="form-input" value="{{ config.get('vps_max_per_node','150') }}">
+        <div class="form-help">Hard ceiling of total VPSes this node can host.</div>
+      </div>
+      <div>
+        <label class="form-label">Min free disk GB reserve</label>
+        <input name="MIN_FREE_DISK_GB" class="form-input" value="{{ config.get('MIN_FREE_DISK_GB','5') }}">
+        <div class="form-help">Refuse new VPS creation when host disk falls below this.</div>
+      </div>
+      <div style="grid-column:1/-1;">
+        <button class="btn btn-primary">Save global config</button>
+      </div>
+    </form>
+  </div>
+
+  <!-- Privacy / anti-abuse -->
+  <div class="card card-sm">
+    <div class="card-title">Privacy &amp; anti-abuse</div>
+    <form method="post" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1rem;">
+      <div>
+        <label class="form-label">IP abuse check enabled</label>
+        <select name="IP_ABUSE_CHECK_ENABLED" class="form-input">
+          <option value="0" {% if config.get('IP_ABUSE_CHECK_ENABLED','0')=='0' %}selected{% endif %}>Off (allow shared IPs / NAT / Cloudflare)</option>
+          <option value="1" {% if config.get('IP_ABUSE_CHECK_ENABLED','0')=='1' %}selected{% endif %}>On (block multiple VPSes from one IP)</option>
+        </select>
+        <div class="form-help">When on, blocks multiple VPSes from the same creator IP. Off by default because Cloudflare Tunnel / shared hosting puts all users behind one IP.</div>
+      </div>
+      <div>
+        <label class="form-label">External IP intel</label>
+        <select name="IP_INTEL_ENABLED" class="form-input">
+          <option value="" {% if not config.get('IP_INTEL_ENABLED') %}selected{% endif %}>Off (no external lookups)</option>
+          <option value="1" {% if config.get('IP_INTEL_ENABLED')=='1' %}selected{% endif %}>On (enable ip-api.com lookups)</option>
+        </select>
+        <div class="form-help">Off by default — visitor IPs are never sent to third parties.</div>
+      </div>
+      <div style="grid-column:1/-1;">
+        <button class="btn btn-primary">Save privacy settings</button>
+      </div>
+    </form>
+  </div>
+
+  <!-- Per-node limits -->
+  <div class="card card-sm">
+    <div class="card-title">Per-node VPS limits</div>
+    <p class="form-help" style="margin-bottom:1rem;">Set different limits for each linked node. Overrides global defaults for that node only.</p>
+    <form method="post" action="{{ url_for('admin_node_limits', node_id=nodes[0].id) if nodes else '#' }}" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:1rem;">
+      {% for n in nodes %}
+      <div style="border:1px solid var(--border);border-radius:var(--radius);padding:1rem;background:var(--bg-1);">
+        <div style="font-weight:600;margin-bottom:.5rem;">{{ n.label or ('Node #' ~ n.id) }}</div>
+        <div style="font-size:.72rem;color:var(--text-3);margin-bottom:.5rem;">{{ n.url }}</div>
+        <input name="max_vps" class="form-input" placeholder="max VPS" value="{{ n.max_vps or 10 }}">
+        <input name="cpu_limit_cores" class="form-input" placeholder="CPU cores" value="{{ n.cpu_limit_cores or 4 }}">
+        <input name="ram_limit_mb" class="form-input" placeholder="RAM MB" value="{{ n.ram_limit_mb or 4096 }}">
+        <input name="disk_limit_gb" class="form-input" placeholder="Disk GB" value="{{ n.disk_limit_gb or 80 }}">
+        <button class="btn btn-primary btn-sm" style="margin-top:.5rem;">Save {{ n.label or ('Node #' ~ n.id) }}</button>
+      </div>
+      {% endfor %}
+    </form>
+  </div>
+
+  <div style="margin-top:2rem;padding-top:1rem;border-top:1px solid var(--border);font-size:.75rem;color:var(--text-3);">
+    <p><strong>Current real client IP detection:</strong> ProxyFix is enabled — <code>request.remote_addr</code> now reads <code>X-Forwarded-For</code> so IPs show the real visitor, not 127.0.0.1.</p>
+  </div>
+</div>
+{% endblock %}

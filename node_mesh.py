@@ -42,6 +42,57 @@ def get_max_vps_per_node():
     except Exception:
         return MAX_VPS_PER_NODE
 
+
+def get_node_limits(node_id: int) -> dict:
+    """Return per-node limit overrides from the nodes table."""
+    try:
+        import sqlite3
+        db = sqlite3.connect("panel.db")
+        db.row_factory = sqlite3.Row
+        row = db.execute(
+            "SELECT max_vps, cpu_limit_cores, ram_limit_mb, disk_limit_gb "
+            "FROM nodes WHERE id=?", (node_id,)
+        ).fetchone()
+        db.close()
+        if row:
+            return {
+                "max_vps": row["max_vps"] or 10,
+                "cpu_limit_cores": row["cpu_limit_cores"] or 4,
+                "ram_limit_mb": row["ram_limit_mb"] or 4096,
+                "disk_limit_gb": row["disk_limit_gb"] or 80,
+            }
+    except Exception:
+        pass
+    return {"max_vps": 10, "cpu_limit_cores": 4, "ram_limit_mb": 4096, "disk_limit_gb": 80}
+
+
+def set_node_limits(node_id: int, max_vps: int = None, cpu_limit_cores: int = None,
+                    ram_limit_mb: int = None, disk_limit_gb: int = None) -> bool:
+    """Update per-node limits on a node."""
+    try:
+        import sqlite3
+        db = sqlite3.connect("panel.db")
+        fields, vals = [], []
+        if max_vps is not None:
+            fields.append("max_vps=?"); vals.append(max_vps)
+        if cpu_limit_cores is not None:
+            fields.append("cpu_limit_cores=?"); vals.append(cpu_limit_cores)
+        if ram_limit_mb is not None:
+            fields.append("ram_limit_mb=?"); vals.append(ram_limit_mb)
+        if disk_limit_gb is not None:
+            fields.append("disk_limit_gb=?"); vals.append(disk_limit_gb)
+        if fields:
+            vals.append(node_id)
+            db.execute(
+                f"UPDATE nodes SET {', '.join(fields)} WHERE id=?",
+                vals
+            )
+            db.commit()
+        db.close()
+        return True
+    except Exception:
+        return False
+
 NODE_CODE = f"{secrets.randbelow(100_000_000):08d}"
 
 _detected_url: str = ""
@@ -87,7 +138,11 @@ def init_mesh_tables(db):
         cpu_cores INTEGER DEFAULT 0,
         ram_mb INTEGER DEFAULT 0,
         disk_gb INTEGER DEFAULT 0,
-        bootstrapped INTEGER DEFAULT 0
+        bootstrapped INTEGER DEFAULT 0,
+        max_vps INTEGER DEFAULT 10,
+        cpu_limit_cores INTEGER DEFAULT 4,
+        ram_limit_mb INTEGER DEFAULT 4096,
+        disk_limit_gb INTEGER DEFAULT 80
     );
     CREATE TABLE IF NOT EXISTS notifications (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -98,6 +153,22 @@ def init_mesh_tables(db):
     # migration for old DBs
     try:
         db.execute("ALTER TABLE nodes ADD COLUMN bootstrapped INTEGER DEFAULT 0")
+    except Exception:
+        pass
+    try:
+        db.execute("ALTER TABLE nodes ADD COLUMN max_vps INTEGER DEFAULT 10")
+    except Exception:
+        pass
+    try:
+        db.execute("ALTER TABLE nodes ADD COLUMN cpu_limit_cores INTEGER DEFAULT 4")
+    except Exception:
+        pass
+    try:
+        db.execute("ALTER TABLE nodes ADD COLUMN ram_limit_mb INTEGER DEFAULT 4096")
+    except Exception:
+        pass
+    try:
+        db.execute("ALTER TABLE nodes ADD COLUMN disk_limit_gb INTEGER DEFAULT 80")
     except Exception:
         pass
     db.commit()
