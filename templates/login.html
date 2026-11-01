@@ -12,6 +12,7 @@
     {% if error %}<div class="alert alert-error">{{ error }}</div>{% endif %}
     <div class="card">
       <form method="post">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <div class="form-group">
           <label class="form-label">Username</label>
           <input name="username" class="form-input" placeholder="your_username" autocomplete="username" autofocus>

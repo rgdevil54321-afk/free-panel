@@ -51,11 +51,13 @@
     <!-- Toolbar: upload + mkdir -->
     <div class="fm-toolbar">
       <form method="post" action="{{ url_for('file_upload', vps_id=vps.id) }}" enctype="multipart/form-data" style="display:flex;align-items:center;gap:.5rem;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <input type="hidden" name="path" value="{{ path }}">
         <input type="file" name="file" id="fileInput" style="display:none;" onchange="this.form.submit()">
         <button type="button" class="btn btn-primary btn-sm" onclick="document.getElementById('fileInput').click()">↑ Upload</button>
       </form>
       <form method="post" action="{{ url_for('file_mkdir', vps_id=vps.id) }}" style="display:flex;align-items:center;gap:.5rem;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <input type="hidden" name="base" value="{{ path }}">
         <input name="name" class="form-input" placeholder="New folder name" style="height:30px;padding:.25rem .6rem;font-size:.78rem;width:160px;">
         <button type="submit" class="btn btn-ghost btn-sm">+ Folder</button>
@@ -91,6 +93,7 @@
         {% endif %}
         <form method="post" action="{{ url_for('file_delete', vps_id=vps.id) }}"
               onsubmit="return confirm('Delete {{ e.name }}?')">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
           <input type="hidden" name="path" value="{{ path.rstrip('/')+'/'+e.name }}">
           <input type="hidden" name="back" value="{{ path }}">
           <button class="btn btn-danger btn-sm">✕</button>

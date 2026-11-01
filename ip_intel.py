@@ -38,7 +38,8 @@ def is_vpn_or_proxy(ip: str) -> tuple[bool, str | None]:
     """
     import os
     # Privacy: never send user IPs to external services unless explicitly enabled.
-    if not os.environ.get("IP_INTEL_ENABLED"):
+    # Must be exactly "1" — "0" or any other value means off.
+    if os.environ.get("IP_INTEL_ENABLED", "0") != "1":
         return False, None
     if not ip or ip in ("127.0.0.1", "::1"):
         return False, None

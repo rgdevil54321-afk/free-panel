@@ -90,6 +90,7 @@
     <button type="submit" class="btn btn-warn btn-sm" onclick="return confirm('Apply to selected VPSes?')">Apply</button>
   </div>
   <form method="post" action="{{ url_for('admin_vps_bulk') }}" id="vps-bulk-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
   <div style="background:var(--bg-1);border:1px solid var(--border);border-radius:var(--r-xl);overflow:hidden;">
     <div style="overflow-x:auto;">
       <table id="vps-table">
@@ -108,10 +109,12 @@
               <div style="display:flex;gap:.3rem;flex-wrap:wrap;">
                 {% if v.status == 'running' %}
                 <form method="post" action="{{ url_for('admin_vps_action', vps_id=v.id, action='suspend') }}" style="margin:0;">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                   <button class="btn btn-warn btn-sm">Suspend</button>
                 </form>
                 {% elif v.status == 'suspended' %}
                 <form method="post" action="{{ url_for('admin_vps_action', vps_id=v.id, action='unsuspend') }}" style="margin:0;">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                   <button class="btn btn-primary btn-sm">Unsuspend</button>
                 </form>
                 {% endif %}
@@ -119,6 +122,7 @@
                 <a href="{{ url_for('dashboard', vps_id=v.id) }}" class="btn btn-primary btn-sm">Manage</a>
                 <form method="post" action="{{ url_for('admin_vps_action', vps_id=v.id, action='delete') }}"
                       onsubmit="return confirm('Delete {{ v.container_id }}?')" style="margin:0;">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                   <button class="btn btn-danger btn-sm">Delete</button>
                 </form>
               </div>
@@ -145,6 +149,7 @@
     <button type="submit" form="user-bulk-form" class="btn btn-warn btn-sm" onclick="return confirm('Apply to selected users?')">Apply</button>
   </div>
   <form method="post" action="{{ url_for('admin_users_bulk') }}" id="user-bulk-form">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
   <div style="background:var(--bg-1);border:1px solid var(--border);border-radius:var(--r-xl);overflow:hidden;">
     <table id="user-table">
       <thead><tr><th><input type="checkbox" onclick="toggleAllUsers(this)"></th><th>ID</th><th>Username</th><th>Signup IP</th><th>Role</th><th>Status</th><th>VPN</th><th>Joined</th><th>Actions</th></tr></thead>
@@ -164,19 +169,23 @@
               {% if not u.is_admin %}
               {% if u.is_suspended %}
               <form method="post" action="{{ url_for('admin_user_unsuspend', user_id=u.id) }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <button class="btn btn-primary btn-sm">Unsuspend</button>
               </form>
               {% else %}
               <form method="post" action="{{ url_for('admin_user_suspend', user_id=u.id) }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <input type="hidden" name="reason" value="Suspended by admin">
                 <button class="btn btn-warn btn-sm">Suspend</button>
               </form>
               {% endif %}
               <form method="post" action="{{ url_for('admin_user_reset_password', user_id=u.id) }}">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <button class="btn btn-ghost btn-sm">Reset PW</button>
               </form>
               <form method="post" action="{{ url_for('admin_user_delete', user_id=u.id) }}"
                     onsubmit="return confirm('Delete user {{ u.username }}?')">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
                 <button class="btn btn-danger btn-sm">Delete</button>
               </form>
               {% endif %}
@@ -194,7 +203,8 @@
   <div class="flex-b" style="margin-bottom:1rem;"><span style="font-size:1.05rem;font-weight:600;color:var(--text);">IP Bans</span><span style="font-size:.72rem;color:var(--text-3);">{{ banned_ips|length }} banned</span></div>
   <div class="section-card" style="max-width:520px;margin-bottom:1rem;">
     <form method="post" action="{{ url_for('admin_ip_ban') }}">
-      <div class="form-group">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <div class="form-group">
         <label class="form-label">IP address</label>
         <input name="ip" class="form-input" placeholder="1.2.3.4">
       </div>
@@ -217,6 +227,7 @@
           <td class="mono" style="font-size:.68rem;color:var(--text-3);">{{ b.created_at | strftime }}</td>
           <td>
             <form method="post" action="{{ url_for('admin_ip_unban', ban_id=b.id) }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
               <button class="btn btn-ghost btn-sm">Unban</button>
             </form>
           </td>
@@ -262,7 +273,8 @@
   <div style="margin-bottom:1rem;"><span style="font-size:1.05rem;font-weight:600;color:var(--text);">Grant VPS</span></div>
   <div class="section-card" style="max-width:520px;">
     <form method="post" action="{{ url_for('admin_grant_vps') }}">
-      <div class="form-group">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <div class="form-group">
         <label class="form-label">Username</label>
         <input name="username" class="form-input" placeholder="target username">
       </div>
@@ -298,7 +310,8 @@
   <div style="margin-bottom:1rem;"><span style="font-size:1.05rem;font-weight:600;color:var(--text);">Free tier limits</span></div>
   <div class="section-card" style="max-width:400px;">
     <form method="post" action="{{ url_for('admin_update_config') }}">
-      <div class="form-group">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <div class="form-group">
         <label class="form-label">CPU cores per VPS</label>
         <input name="vps_cpu_cores" type="number" class="form-input" min="1" max="32" value="{{ config.get('vps_cpu_cores',4) }}">
       </div>
@@ -331,7 +344,8 @@
     <hr class="divider">
     {% endif %}
     <form method="post" action="{{ url_for('admin_broadcast_set') }}">
-      <div class="form-group">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <div class="form-group">
         <label class="form-label">Message</label>
         <input name="message" class="form-input" placeholder="Scheduled maintenance at 03:00 UTC…" maxlength="500">
       </div>

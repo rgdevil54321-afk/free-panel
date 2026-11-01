@@ -103,28 +103,59 @@ def get_nat_rule(db, vps_id: int) -> dict | None:
 
 
 def _next_ssh_port(db) -> int:
-    used = {r[0] for r in db.execute("SELECT ssh_port FROM nat_rules").fetchall()}
-    for port in range(SSH_PORT_START, SSH_PORT_END + 1):
-        if port not in used:
-            return port
+    """Atomically allocate the next free SSH port.
+
+    Uses BEGIN IMMEDIATE to acquire a write lock before reading used ports,
+    preventing race conditions between concurrent VPS creations. Retries
+    with backoff up to 5 times if the lock is contended.
+    """
+    import time as _time
+    for attempt in range(5):
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            used = {r[0] for r in db.execute("SELECT ssh_port FROM nat_rules").fetchall()}
+            for port in range(SSH_PORT_START, SSH_PORT_END + 1):
+                if port not in used:
+                    db.execute("COMMIT")
+                    return port
+            db.execute("COMMIT")
+        except sqlite3.OperationalError:
+            try:
+                db.execute("ROLLBACK")
+            except sqlite3.OperationalError:
+                pass
+        _time.sleep(0.1 * (attempt + 1))
     raise RuntimeError("SSH port range exhausted (10000–10999)")
 
 
 def _next_extra_ports(db, count: int = EXTRA_PORTS_PER_VPS) -> list[int]:
-    used = set()
-    for row in db.execute("SELECT extra_ports FROM nat_rules").fetchall():
-        for p in (row[0] or "").split(","):
-            if p.strip().isdigit():
-                used.add(int(p.strip()))
-    ports = []
-    for port in range(EXTRA_PORT_START, EXTRA_PORT_END + 1):
-        if port not in used:
-            ports.append(port)
+    """Atomically allocate extra ports with BEGIN IMMEDIATE locking."""
+    import time as _time
+    for attempt in range(5):
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            used = set()
+            for row in db.execute("SELECT extra_ports FROM nat_rules").fetchall():
+                for p in (row[0] or "").split(","):
+                    if p.strip().isdigit():
+                        used.add(int(p.strip()))
+            ports = []
+            for port in range(EXTRA_PORT_START, EXTRA_PORT_END + 1):
+                if port not in used:
+                    ports.append(port)
+                    if len(ports) == count:
+                        break
             if len(ports) == count:
-                break
-    if len(ports) < count:
-        raise RuntimeError("Extra port range exhausted")
-    return ports
+                db.execute("COMMIT")
+                return ports
+            db.execute("ROLLBACK")
+        except sqlite3.OperationalError:
+            try:
+                db.execute("ROLLBACK")
+            except sqlite3.OperationalError:
+                pass
+        _time.sleep(0.1 * (attempt + 1))
+    raise RuntimeError("Extra port range exhausted")
 
 
 # ── iptables helpers ─────────────────────────────────────────────────────────

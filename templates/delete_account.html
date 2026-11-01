@@ -10,7 +10,8 @@
       <p style="font-size:.8rem;color:var(--text-2);margin-top:.4rem;">All your VPS containers and NAT rules will be permanently removed.</p>
     </div>
     <form method="post">
-      <div class="form-group">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <div class="form-group">
         <label class="form-label">Enter your recovery code to confirm</label>
         <input name="code" class="form-input" placeholder="XXXXXX" style="text-transform:uppercase;letter-spacing:.1em;font-family:var(--mono);">
       </div>

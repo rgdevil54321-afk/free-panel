@@ -299,19 +299,23 @@
     <div class="action-row">
       {% if vps.status == 'running' %}
       <form method="post" action="{{ url_for('vps_power', vps_id=vps.id, action='stop') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <button class="btn btn-ghost btn-sm">&#9632; Stop</button>
       </form>
       {% elif vps.status == 'stopped' %}
       <form method="post" action="{{ url_for('vps_power', vps_id=vps.id, action='start') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <button class="btn btn-primary btn-sm">&#9654; Start</button>
       </form>
       {% endif %}
       <form method="post" action="{{ url_for('vps_power', vps_id=vps.id, action='reinstall') }}"
             onsubmit="return confirm('Reinstall wipes all data. Continue?')">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <button class="btn btn-warn btn-sm">&#8635; Reinstall</button>
       </form>
       <form method="post" action="{{ url_for('vps_delete', vps_id=vps.id) }}"
             onsubmit="return confirm('Delete this VPS permanently? This cannot be undone.')">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <button class="btn btn-ghost btn-sm" style="color:var(--danger);">&#128465; Delete</button>
       </form>
       <a href="{{ url_for('file_manager', vps_id=vps.id) }}" class="btn btn-ghost btn-sm">&#128193; Files</a>
@@ -348,6 +352,7 @@
     {% endif %}
     <div style="margin-left:auto;display:flex;align-items:center;padding:.2rem 0;">
       <form method="post" action="{{ url_for('regen_ssh', vps_id=vps.id) }}" style="margin:0;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
         <button class="btn btn-ghost btn-sm">&#8635; Regen</button>
       </form>
     </div>

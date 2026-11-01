@@ -160,7 +160,8 @@
       both nodes are linked and LXD is bootstrapped automatically on this node.
     </p>
     <form method="post" class="form-row" style="align-items:flex-end;">
-      <div class="form-group" style="margin:0;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <div class="form-group" style="margin:0;">
         <label class="form-label">Remote node URL</label>
         <input name="remote_url" class="form-input" placeholder="https://node2.example.com">
       </div>
