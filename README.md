@@ -21,7 +21,7 @@ On a fresh Debian 12 / Ubuntu 22.04+ VPS:
 
 ```bash
 git clone https://github.com/rgdevil54321-afk/free-panel.git
-cd free-panel-dxd
+cd free-panel
 bash install.sh
 ```
 
@@ -101,7 +101,13 @@ PANEL_USER=admin PANEL_PASS='change-me' VPS_CPU=4 VPS_RAM=4 VPS_DISK=80 \
 
 Other flags: `--reinstall`, `--update`, `--start`, `--stop`, `--restart`,
 `--status`, `--logs`, `--backup`, `--restore [file]`, `--reset-admin`,
-`--port N`, `--uninstall [--purge]`, `--help`.
+`--port N`, `--uninstall [--purge]`, `--cloudflare`, `--diagnose`, `--help`.
+
+Additional commands:
+- `--repair` — Detect and repair broken components
+- `--diagnose` — Run full system diagnostics
+- `--cloudflare` — Connect Cloudflare Tunnel
+- `--no-color` — Disable colored output
 
 ## Environment variables
 
