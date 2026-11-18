@@ -187,7 +187,7 @@ class UI:
 
     @staticmethod
     def ask(prompt: str, default: str = "", secret: bool = False) -> str:
-        """Prompt user for input."""
+        """Prompt user for input. Returns default if user presses Enter."""
         if default:
             full = f"  {prompt} [{default}]: "
         else:
@@ -195,13 +195,15 @@ class UI:
         if secret:
             import getpass
             try:
-                return getpass.getpass(full)
+                val = getpass.getpass(full)
             except Exception:
-                return input(full)
-        try:
-            return input(full)
-        except EOFError:
-            return default
+                val = input(full)
+        else:
+            try:
+                val = input(full)
+            except EOFError:
+                val = ""
+        return val.strip() or default
 
     @staticmethod
     def confirm(prompt: str, default: bool = True) -> bool:
@@ -1528,9 +1530,12 @@ class Installer:
             if not password:
                 password = secrets.token_urlsafe(12)
                 UI.info(f"Generated password: {password}")
-        cpu = int(UI.ask("CPU cores per VPS", "4"))
-        ram = int(UI.ask("RAM GB per VPS", "4"))
-        disk = int(UI.ask("Disk GB per VPS", "80"))
+        cpu_raw = UI.ask("CPU cores per VPS", "4")
+        ram_raw = UI.ask("RAM GB per VPS", "4")
+        disk_raw = UI.ask("Disk GB per VPS", "80")
+        cpu = int(cpu_raw) if cpu_raw.strip() else 4
+        ram = int(ram_raw) if ram_raw.strip() else 4
+        disk = int(disk_raw) if disk_raw.strip() else 80
         return {
             "username": username or "admin",
             "password": password,
