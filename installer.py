@@ -1171,7 +1171,7 @@ class Installer:
         else:
             UI.err("Installation verification failed")
             self.log.error("Verification failed")
-            self._diagnose()
+            self._do_diagnose()
 
     def _do_reinstall(self):
         """Reinstall (keeps database)."""
@@ -1269,7 +1269,7 @@ class Installer:
             UI.ok("Repair successful")
         else:
             UI.err("Repair failed — check logs")
-            self._diagnose()
+            self._do_diagnose()
 
     def _do_uninstall(self):
         """Uninstall panel."""
@@ -1646,7 +1646,7 @@ class Installer:
             UI.ok("Repair successful")
         else:
             UI.err("Repair failed — check logs")
-            self._diagnose()
+            self._do_diagnose()
 
     def _kill_jail_processes(self, jail: str):
         """Kill all processes whose root is the given jail."""
