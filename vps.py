@@ -574,6 +574,45 @@ def _ubuntu_base_url() -> str | None:
     return UBUNTU_BASE_INDEX + "ubuntu-base-24.04.1-base-amd64.tar.gz"
 
 
+def _write_chroot_resolv(root: str):
+    """Write a working /etc/resolv.conf into a chroot.
+
+    The host's /etc/resolv.conf is frequently a systemd-resolved stub
+    (nameserver 127.0.0.53). Inside a chroot that address is the chroot's own
+    loopback with nothing listening, so all DNS fails. Prefer the real upstream
+    servers from /run/systemd/resolve/resolv.conf, falling back to public DNS.
+    """
+    ips = []
+    for src in ("/run/systemd/resolve/resolv.conf", "/etc/resolv.conf"):
+        try:
+            if not os.path.isfile(src):
+                continue
+            with open(src, encoding="utf-8", errors="replace") as f:
+                for ln in f:
+                    s = ln.strip()
+                    if s.startswith("nameserver "):
+                        ip = s.split(None, 1)[1].strip()
+                        if ip not in ("127.0.0.53", "127.0.0.1", "::1") and ip not in ips:
+                            ips.append(ip)
+        except Exception:
+            pass
+    for fb in ("1.1.1.1", "8.8.8.8"):
+        if fb not in ips:
+            ips.append(fb)
+    target = os.path.join(root, "etc", "resolv.conf")
+    try:
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        if os.path.lexists(target) and os.path.islink(target):
+            os.unlink(target)
+    except Exception:
+        pass
+    with open(target, "w", encoding="utf-8") as f:
+        for ip in ips[:3]:
+            f.write("nameserver " + ip + "\n")
+        f.write("options timeout:2 attempts:3\n")
+    return target
+
+
 def _install_openssh_in_chroot(root: str) -> bool:
     """Install a working sshd inside the chroot.
 
@@ -601,13 +640,8 @@ def _install_openssh_in_chroot(root: str) -> bool:
         except Exception:
             pass
 
-    # network config inside the chroot
-    try:
-        os.makedirs(os.path.join(root, "etc"), exist_ok=True)
-        shutil.copyfile("/etc/resolv.conf", os.path.join(root, "etc", "resolv.conf"))
-    except Exception:
-        with open(os.path.join(root, "etc", "resolv.conf"), "w") as f:
-            f.write("nameserver 1.1.1.1\nnameserver 8.8.8.8\n")
+    # network config inside the chroot (real DNS, never the 127.0.0.53 stub)
+    _write_chroot_resolv(root)
 
     os.makedirs(os.path.join(root, "usr", "sbin"), exist_ok=True)
     with open(os.path.join(root, "usr", "sbin", "policy-rc.d"), "w") as f:
@@ -823,12 +857,8 @@ def _finalize_base(root: str):
         f.write("#!/bin/sh\nexit 101\n")
     os.chmod(prc, 0o755)
 
-    # DNS
-    try:
-        shutil.copyfile("/etc/resolv.conf", os.path.join(root, "etc", "resolv.conf"))
-    except Exception:
-        with open(os.path.join(root, "etc", "resolv.conf"), "w") as f:
-            f.write("nameserver 1.1.1.1\nnameserver 8.8.8.8\n")
+    # DNS (real resolvers, not the host's systemd-resolved stub)
+    _write_chroot_resolv(root)
 
     with open(os.path.join(root, "etc", "hostname"), "w") as f:
         f.write("vps-node\n")
