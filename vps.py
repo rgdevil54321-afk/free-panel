@@ -53,7 +53,7 @@ except Exception:                                     # pragma: no cover
 # ── constants ───────────────────────────────────────────────────────────────
 
 BACKEND      = "chroot"
-IMAGE_ALIAS  = os.environ.get("VPS_IMAGE_ALIAS", "ubuntu/22.04")
+IMAGE_ALIAS  = os.environ.get("VPS_IMAGE_ALIAS", "ubuntu/24.04")
 STORAGE_POOL = os.environ.get("VPS_STORAGE_POOL", "zfs-new")
 DB           = "panel.db"
 
@@ -81,7 +81,7 @@ CHROOT_ENV = {
     "DEBIAN_FRONTEND": "noninteractive",
 }
 
-UBUNTU_BASE_INDEX = "https://cdimage.ubuntu.com/ubuntu-base/releases/22.04/release/"
+UBUNTU_BASE_INDEX = "https://cdimage.ubuntu.com/ubuntu-base/releases/24.04/release/"
 UBUNTU_MIRROR     = "http://archive.ubuntu.com/ubuntu/"
 
 
@@ -566,12 +566,12 @@ def _download(url: str, dst: str, timeout: int = 60) -> bool:
 def _ubuntu_base_url() -> str | None:
     try:
         html = urllib.request.urlopen(UBUNTU_BASE_INDEX, timeout=20).read().decode("utf-8", "replace")
-        names = sorted(set(re.findall(r"ubuntu-base-22\.04\.\d+-base-amd64\.tar\.gz", html)))
+        names = sorted(set(re.findall(r"ubuntu-base-24\.04\.\d+-base-amd64\.tar\.gz", html)))
         if names:
             return UBUNTU_BASE_INDEX + names[-1]
     except Exception as e:
         print(f"[base] index lookup failed: {e}")
-    return UBUNTU_BASE_INDEX + "ubuntu-base-22.04.5-base-amd64.tar.gz"
+    return UBUNTU_BASE_INDEX + "ubuntu-base-24.04.1-base-amd64.tar.gz"
 
 
 def _install_openssh_in_chroot(root: str) -> bool:
@@ -632,6 +632,13 @@ def _install_openssh_in_chroot(root: str) -> bool:
             except Exception as e:
                 print(f"[base] could not copy {src}: {e}")
                 return False
+            # Skip glibc / core system libraries: these must come from the
+            # chroot's own base rootfs, never from the host (host glibc is a
+            # different version and breaks every binary in the jail).
+            _SKIP_LIBS = {
+                "libc.so", "libm.so", "libdl.so", "libpthread.so", "librt.so",
+                "libresolv.so", "libnss_", "ld-linux", "libcrypt.so",
+            }
             try:
                 out = subprocess.run(
                     ["ldd", src], capture_output=True, text=True, timeout=15
@@ -644,8 +651,12 @@ def _install_openssh_in_chroot(root: str) -> bool:
                     continue
                 parts = line.split("=>")
                 lib_path = parts[1].strip().split(" ")[0]
-                if lib_path and lib_path != "not found" and os.path.isfile(lib_path):
-                    copy_binary(lib_path)
+                if not lib_path or lib_path == "not found" or not os.path.isfile(lib_path):
+                    continue
+                lib_name = os.path.basename(lib_path).split(".so")[0] + ".so"
+                if any(lib_name.startswith(s) for s in _SKIP_LIBS):
+                    continue
+                copy_binary(lib_path)
             return True
 
         if copy_binary(sshd):
@@ -761,7 +772,7 @@ def _build_from_debootstrap(root: str) -> bool:
     cmd = [
         "debootstrap", "--variant=minbase", "--no-check-gpg",
         "--include=openssh-server,ca-certificates,curl,iproute2,procps,less,nano",
-        "jammy", root, UBUNTU_MIRROR,
+        "noble", root, UBUNTU_MIRROR,
     ]
     try:
         print("[base] running debootstrap (this takes a few minutes)")
