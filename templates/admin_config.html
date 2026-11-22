@@ -22,6 +22,7 @@
   <div class="card card-sm">
     <div class="card-title">Global limits</div>
     <form method="post" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1rem;">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <div>
         <label class="form-label">VPS CPU cores (default)</label>
         <input name="vps_cpu_cores" class="form-input" value="{{ config.get('vps_cpu_cores','4') }}">
@@ -57,6 +58,7 @@
   <div class="card card-sm">
     <div class="card-title">Privacy &amp; anti-abuse</div>
     <form method="post" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));gap:1rem;">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <div>
         <label class="form-label">IP abuse check enabled</label>
         <select name="IP_ABUSE_CHECK_ENABLED" class="form-input">
@@ -84,6 +86,7 @@
     <div class="card-title">Per-node VPS limits</div>
     <p class="form-help" style="margin-bottom:1rem;">Set different limits for each linked node. Overrides global defaults for that node only.</p>
     <form method="post" action="{{ url_for('admin_node_limits', node_id=nodes[0].id) if nodes else '#' }}" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(300px,1fr));gap:1rem;">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       {% for n in nodes %}
       <div style="border:1px solid var(--border);border-radius:var(--radius);padding:1rem;background:var(--bg-1);">
         <div style="font-weight:600;margin-bottom:.5rem;">{{ n.label or ('Node #' ~ n.id) }}</div>

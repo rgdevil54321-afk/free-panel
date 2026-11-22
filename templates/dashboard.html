@@ -108,6 +108,7 @@
     {% endif %}
     {% if not all_vps %}
     <form method="post" action="{{ url_for('vps_create') }}" style="margin-top:.3rem;">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <button class="btn btn-primary btn-full btn-sm">+ Create VPS</button>
     </form>
     {% endif %}
@@ -173,6 +174,7 @@
     Ubuntu 22.04, root access, shared IP with your own dedicated ports. Ready in about 2 minutes.
   </p>
   <form method="post" action="{{ url_for('vps_create') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <button class="btn btn-primary">+ Create VPS</button>
   </form>
 </div>
@@ -211,6 +213,7 @@
 <div class="card">
   <div class="alert alert-error">Build failed: {{ vps.ssh_command }}</div>
   <form method="post" action="{{ url_for('vps_dismiss', vps_id=vps.id) }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <button class="btn btn-ghost btn-sm">Dismiss</button>
   </form>
 </div>
@@ -266,6 +269,7 @@
     {% if vps.status == 'running' %}
     <form method="post" action="{{ url_for('vps_reset_password', vps_id=vps.id) }}" style="margin:0;"
           onsubmit="return confirm('Generate a new root password? The old one stops working.');">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
       <button type="submit" class="btn btn-ghost btn-sm">Reset password</button>
     </form>
     {% endif %}
@@ -400,6 +404,7 @@
 <div class="card card-sm">
   <div class="card-title">Leave a review</div>
   <form method="post" action="{{ url_for('submit_feedback') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
     <input type="hidden" name="stars" id="starInput" value="0">
     <div style="display:flex;align-items:center;gap:.85rem;flex-wrap:wrap;">
       <div id="starRow" style="display:flex;gap:.1rem;">

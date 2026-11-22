@@ -14,6 +14,7 @@ import time
 import sqlite3
 import secrets
 import threading
+import base64
 import requests
 import logging
 
