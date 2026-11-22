@@ -33,6 +33,7 @@ import queue_manager as queue
 import node_mesh
 import ip_intel
 import nat
+import discord_integration as discord_mod
 
 DB = "panel.db"
 
@@ -233,6 +234,7 @@ def init_db():
     db.commit()
     node_mesh.init_mesh_tables(db)
     nat.init_nat_tables(db)
+    discord_mod.init_discord_tables(db)
     db.close()
 
 
@@ -513,6 +515,12 @@ def vps_create():
     found_elsewhere, other_url = node_mesh.check_ip_across_mesh(db, ip)
     if found_elsewhere and os.environ.get("IP_ABUSE_CHECK_ENABLED", "0") == "1":
         flash(f"This IP already has a VPS on another node ({other_url})."); return redirect(url_for("dashboard"))
+
+    # Discord membership eligibility check
+    eligible, reason, missing = discord_mod.check_vps_eligibility(current_user.id)
+    if not eligible:
+        flash(f"VPS creation blocked: {reason}")
+        return redirect(url_for("discord_page"))
 
     allowed, current_count = can_create_vps()
     if not allowed:
@@ -1379,6 +1387,169 @@ def vps_stats_summary():
     db  = get_db()
     cnt = db.execute("SELECT COUNT(*) FROM vps WHERE status NOT IN ('failed','deleted')").fetchone()[0]
     return jsonify({"vps_count":cnt,"max":MAX_VPS_PER_NODE})
+
+# ── Discord Integration ───────────────────────────────────────────────────────
+
+@app.route("/discord")
+@login_required
+def discord_page():
+    status = discord_mod.get_user_discord_status(current_user.id)
+    required_servers = discord_mod.get_required_servers()
+    oauth_url = discord_mod.get_oauth_url(current_user.id)
+    config = discord_mod.get_discord_config()
+    return render_template("discord.html", status=status, required_servers=required_servers,
+                           oauth_url=oauth_url, config=config)
+
+
+@app.route("/discord/link")
+@login_required
+def discord_link():
+    oauth_url = discord_mod.get_oauth_url(current_user.id)
+    if not oauth_url:
+        flash("Discord integration not configured. Contact admin.")
+        return redirect(url_for("discord_page"))
+    return redirect(oauth_url)
+
+
+@app.route("/discord/callback")
+@login_required
+def discord_callback():
+    code = request.args.get("code")
+    state = request.args.get("state")
+    if not code:
+        flash("Discord authorization failed or was cancelled.")
+        return redirect(url_for("discord_page"))
+    user_id = discord_mod.validate_oauth_state(state)
+    if user_id != current_user.id:
+        flash("Invalid OAuth state. Please try again.")
+        return redirect(url_for("discord_page"))
+    token_data = discord_mod.exchange_code_for_token(code)
+    if not token_data:
+        flash("Failed to exchange authorization code. Please try again.")
+        return redirect(url_for("discord_page"))
+    access_token = token_data.get("access_token")
+    refresh_token = token_data.get("refresh_token")
+    expires_in = token_data.get("expires_in", 0)
+    profile = discord_mod.get_discord_user(access_token)
+    if not profile:
+        flash("Failed to get Discord profile. Please try again.")
+        return redirect(url_for("discord_page"))
+    ok, msg = discord_mod.link_discord_account(
+        current_user.id, profile, access_token, refresh_token, expires_in
+    )
+    if not ok:
+        flash(msg)
+        return redirect(url_for("discord_page"))
+    flash(f"Discord account linked: {profile.get('username', 'unknown')}")
+    # Auto-verify membership
+    result = discord_mod.verify_user_membership(current_user.id, force=True)
+    if result["verified"]:
+        flash("All membership requirements verified! You can now create a VPS.")
+    else:
+        missing = ", ".join(result["missing"])
+        flash(f"Please join the missing servers: {missing}")
+    return redirect(url_for("discord_page"))
+
+
+@app.route("/discord/verify", methods=["POST"])
+@login_required
+def discord_verify():
+    result = discord_mod.verify_user_membership(current_user.id, force=True)
+    if result["verified"]:
+        flash("All membership requirements verified!")
+    else:
+        missing = ", ".join(result["missing"])
+        flash(f"Missing servers: {missing}")
+    return redirect(url_for("discord_page"))
+
+
+@app.route("/discord/join/<server_id>", methods=["POST"])
+@login_required
+def discord_join(server_id):
+    db = get_db()
+    link = db.execute("SELECT oauth_token_encrypted FROM discord_links WHERE user_id=?", (current_user.id,)).fetchone()
+    db.close()
+    if not link:
+        flash("Discord not linked")
+        return redirect(url_for("discord_page"))
+    access_token = discord_mod._decrypt_token(link["oauth_token_encrypted"])
+    ok, msg = discord_mod.attempt_join_missing(current_user.id, server_id, access_token)
+    if ok:
+        flash(f"Joined {server_id} successfully")
+    else:
+        flash(f"Could not auto-join: {msg}")
+    # Re-verify
+    discord_mod.verify_user_membership(current_user.id, force=True)
+    return redirect(url_for("discord_page"))
+
+
+@app.route("/discord/disconnect", methods=["POST"])
+@login_required
+def discord_disconnect():
+    discord_mod.unlink_discord_account(current_user.id)
+    flash("Discord account disconnected. You will need to relink to create a VPS.")
+    return redirect(url_for("discord_page"))
+
+
+@app.route("/admin/discord", methods=["GET", "POST"])
+@login_required
+def admin_discord():
+    if not current_user.is_admin:
+        return "Forbidden", 403
+    db = get_db()
+    if request.method == "POST":
+        action = request.form.get("action", "")
+        if action == "save_config":
+            config_keys = ["bot_token", "application_id", "client_id", "client_secret",
+                           "oauth_redirect_url", "main_server_id", "main_server_invite_url",
+                           "main_server_name", "main_server_enabled", "auto_join_enabled",
+                           "suspension_enabled", "grace_period_hours",
+                           "verification_interval_hours", "log_channel_id"]
+            config = {}
+            for key in config_keys:
+                val = request.form.get(key, "").strip()
+                config[key] = val
+            discord_mod.update_discord_config(config, current_user.id)
+            flash("Discord configuration saved")
+        elif action.startswith("save_slot_"):
+            slot_num = int(action.split("_")[-1])
+            enabled = 1 if request.form.get(f"slot_{slot_num}_enabled") else 0
+            discord_mod.update_promotion_slot(
+                slot_num,
+                enabled=enabled,
+                server_name=request.form.get(f"slot_{slot_num}_name", "").strip(),
+                server_id=request.form.get(f"slot_{slot_num}_id", "").strip(),
+                invite_url=request.form.get(f"slot_{slot_num}_invite", "").strip(),
+            )
+            flash(f"Promotion slot {slot_num} updated")
+        elif action == "test_connection":
+            ok, msg = discord_mod.check_bot_connection()
+            flash(f"Bot connection: {msg}")
+        elif action == "test_slot":
+            slot_num = int(request.form.get("slot_number", 0))
+            ok, msg = discord_mod.test_promotion_slot(slot_num)
+            flash(f"Slot {slot_num}: {msg}")
+        db.commit()
+        return redirect(url_for("admin_discord"))
+
+    config = discord_mod.get_discord_config()
+    slots = discord_mod.get_promotion_slots()
+    bot_ok, bot_msg = discord_mod.check_bot_connection()
+    # Stats
+    db = get_db()
+    total_linked = db.execute("SELECT COUNT(*) FROM discord_links WHERE status='linked'").fetchone()[0]
+    verified_count = 0
+    for link in db.execute("SELECT user_id FROM discord_links WHERE status='linked'").fetchall():
+        # Quick check without full verification
+        verified_count += 1
+    active_suspensions = db.execute(
+        "SELECT COUNT(*) FROM discord_membership_suspensions WHERE is_active=1"
+    ).fetchone()[0]
+    db.close()
+    return render_template("admin_discord.html", config=config, slots=slots,
+                           bot_ok=bot_ok, bot_msg=bot_msg,
+                           total_linked=total_linked, active_suspensions=active_suspensions)
+
 
 # ── Boot ──────────────────────────────────────────────────────────────────────
 

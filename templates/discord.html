@@ -1,0 +1,140 @@
+{% extends "base.html" %}
+{% block title %}Discord — DeupGaming{% endblock %}
+{% block body %}
+<div class="page">
+  <div class="page-hdr" style="margin-bottom:1.5rem;">
+    <h1>Discord Integration</h1>
+    <p>Link your Discord account to verify membership and create VPS instances.</p>
+  </div>
+
+  {% with messages = get_flashed_messages() %}
+    {% if messages %}
+      {% for msg in messages %}
+      <div class="alert alert-info">{{ msg }}</div>
+      {% endfor %}
+    {% endif %}
+  {% endwith %}
+
+  {% if not status.linked %}
+  <!-- Not linked -->
+  <div class="card" style="text-align:center;padding:2.5rem;">
+    <div style="font-size:2.5rem;margin-bottom:1rem;">🔗</div>
+    <h2 style="font-size:1.1rem;font-weight:600;margin-bottom:.5rem;">Link your Discord account</h2>
+    <p style="color:var(--text-2);font-size:.85rem;margin-bottom:1.5rem;max-width:400px;margin-left:auto;margin-right:auto;">
+      You must link your Discord account and join all required servers before creating a VPS.
+    </p>
+    {% if oauth_url %}
+    <a href="{{ oauth_url }}" class="btn btn-primary">Link Discord Account</a>
+    {% else %}
+    <div class="alert alert-warn">Discord integration is not configured by admin. Contact the administrator.</div>
+    {% endif %}
+  </div>
+  {% else %}
+  <!-- Linked -->
+  <div class="card card-sm" style="margin-bottom:1.5rem;">
+    <div class="card-title">Discord account</div>
+    <div style="display:flex;align-items:center;gap:1rem;">
+      {% if status.discord_avatar %}
+      <img src="https://cdn.discordapp.com/avatars/{{ status.discord_id }}/{{ status.discord_avatar }}.png" style="width:48px;height:48px;border-radius:50%;border:2px solid var(--border);" alt="avatar">
+      {% else %}
+      <div style="width:48px;height:48px;border-radius:50%;background:var(--bg-3);display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:1.2rem;">{{ status.discord_username[0] if status.discord_username else '?' }}</div>
+      {% endif %}
+      <div>
+        <div style="font-weight:600;">{{ status.discord_username }}#{{ status.discord_discriminator if status.discord_discriminator != '0' else '' }}</div>
+        <div style="font-size:.72rem;color:var(--text-3);font-family:var(--mono);">ID: {{ status.discord_id }}</div>
+        <div style="margin-top:.3rem;">
+          <span class="badge {{ 'badge-green' if status.oauth_valid else 'badge-red' }}">{{ 'Authorized' if status.oauth_valid else 'Expired' }}</span>
+        </div>
+      </div>
+      <div style="margin-left:auto;display:flex;gap:.5rem;">
+        <form method="post" action="{{ url_for('discord_verify') }}" style="margin:0;">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <button class="btn btn-ghost btn-sm">Verify Membership</button>
+        </form>
+        <form method="post" action="{{ url_for('discord_disconnect') }}" style="margin:0;"
+              onsubmit="return confirm('Disconnect Discord account? You will need to relink to create VPSes.')">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <button class="btn btn-ghost btn-sm" style="color:var(--danger);">Disconnect</button>
+        </form>
+      </div>
+    </div>
+    {% if status.last_verified_at %}
+    <div style="font-size:.7rem;color:var(--text-3);margin-top:.5rem;">Last verified: {{ status.last_verified_at | strftime }}</div>
+    {% endif %}
+  </div>
+
+  <!-- Membership status -->
+  <div class="card card-sm">
+    <div class="card-title">Membership requirements</div>
+    {% if status.missing %}
+    <div class="alert alert-warn" style="margin-bottom:1rem;">
+      You are missing required servers. Join them below to create a VPS.
+    </div>
+    {% else %}
+    <div class="alert alert-success" style="margin-bottom:1rem;">
+      All membership requirements met! You can create a VPS.
+    </div>
+    {% endif %}
+
+    <div style="display:flex;flex-direction:column;gap:.5rem;">
+      <!-- Main server -->
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:.6rem .8rem;background:var(--bg-2);border-radius:var(--r);border:1px solid var(--border);">
+        <div>
+          <div style="font-weight:500;font-size:.85rem;">{{ status.main_server.name }} <span class="badge badge-blue" style="font-size:.6rem;">Required</span></div>
+          <div style="font-size:.7rem;color:var(--text-3);">Main community server</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:.5rem;">
+          {% if status.main_server.status == 'verified' %}
+          <span class="badge badge-green">✓ Verified</span>
+          {% else %}
+          <span class="badge badge-red">Missing</span>
+          <a href="{{ status.main_server.invite_url }}" target="_blank" class="btn btn-primary btn-sm">Join</a>
+          {% endif %}
+        </div>
+      </div>
+
+      <!-- Promotion servers -->
+      {% for ps in status.promotion_servers %}
+      <div style="display:flex;align-items:center;justify-content:space-between;padding:.6rem .8rem;background:var(--bg-2);border-radius:var(--r);border:1px solid var(--border);">
+        <div>
+          <div style="font-weight:500;font-size:.85rem;">{{ ps.name }} <span class="badge badge-yellow" style="font-size:.6rem;">Promo</span></div>
+          <div style="font-size:.7rem;color:var(--text-3);">Promotion server (slot {{ ps.slot }})</div>
+        </div>
+        <div style="display:flex;align-items:center;gap:.5rem;">
+          {% if ps.status == 'verified' %}
+          <span class="badge badge-green">✓ Verified</span>
+          {% else %}
+          <span class="badge badge-red">Missing</span>
+          <a href="{{ ps.invite_url }}" target="_blank" class="btn btn-primary btn-sm">Join</a>
+          <form method="post" action="{{ url_for('discord_join', server_id=ps.server_id) }}" style="margin:0;">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+            <button class="btn btn-ghost btn-sm">Auto-join</button>
+          </form>
+          {% endif %}
+        </div>
+      </div>
+      {% endfor %}
+    </div>
+
+    {% if status.missing %}
+    <div style="margin-top:1rem;display:flex;gap:.5rem;flex-wrap:wrap;">
+      <form method="post" action="{{ url_for('discord_verify') }}" style="margin:0;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <button class="btn btn-primary">Re-verify after joining</button>
+      </form>
+    </div>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  <!-- Reauthorize -->
+  {% if status.linked and not status.oauth_valid %}
+  <div class="card" style="margin-top:1rem;">
+    <div class="alert alert-warn">Your Discord authorization has expired. Please reauthorize.</div>
+    {% if oauth_url %}
+    <a href="{{ oauth_url }}" class="btn btn-primary">Reauthorize Discord</a>
+    {% endif %}
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

@@ -1,0 +1,186 @@
+{% extends "base.html" %}
+{% block title %}Discord Admin — DeupGaming Admin{% endblock %}
+{% block body %}
+<div class="page">
+  <div class="page-hdr flex-b" style="margin-bottom:1.75rem;">
+    <div>
+      <h1>Discord Membership Manager</h1>
+      <p>Configure Discord integration, promotion servers, and membership enforcement.</p>
+    </div>
+    <a href="{{ url_for('admin') }}" class="btn btn-ghost btn-sm">← Back to Admin</a>
+  </div>
+
+  {% with messages = get_flashed_messages() %}
+    {% if messages %}
+      {% for msg in messages %}
+      <div class="alert alert-info">{{ msg }}</div>
+      {% endfor %}
+    {% endif %}
+  {% endwith %}
+
+  <!-- Bot status -->
+  <div class="card card-sm" style="margin-bottom:1.5rem;">
+    <div class="card-title">Bot connection</div>
+    <div style="display:flex;align-items:center;gap:1rem;flex-wrap:wrap;">
+      <span class="badge {{ 'badge-green' if bot_ok else 'badge-red' }}">{{ 'Connected' if bot_ok else 'Disconnected' }}</span>
+      <span style="font-size:.8rem;color:var(--text-2);">{{ bot_msg }}</span>
+      <form method="post" style="margin:0;" action="{{ url_for('admin_discord') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="action" value="test_connection">
+        <button class="btn btn-ghost btn-sm">Test connection</button>
+      </form>
+    </div>
+    <div style="margin-top:.75rem;font-size:.7rem;color:var(--text-3);">
+      Linked users: {{ total_linked }} &middot; Active suspensions: {{ active_suspensions }}
+    </div>
+  </div>
+
+  <!-- Discord config -->
+  <div class="card card-sm" style="margin-bottom:1.5rem;">
+    <div class="card-title">Discord configuration</div>
+    <form method="post" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1rem;">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <input type="hidden" name="action" value="save_config">
+      <div>
+        <label class="form-label">Bot token</label>
+        <input name="bot_token" class="form-input" type="password" value="{{ config.get('bot_token','') }}" placeholder="Bot token (stored encrypted)">
+      </div>
+      <div>
+        <label class="form-label">Application ID</label>
+        <input name="application_id" class="form-input" value="{{ config.get('application_id','') }}">
+      </div>
+      <div>
+        <label class="form-label">Client ID</label>
+        <input name="client_id" class="form-input" value="{{ config.get('client_id','') }}">
+      </div>
+      <div>
+        <label class="form-label">Client Secret</label>
+        <input name="client_secret" class="form-input" type="password" value="{{ config.get('client_secret','') }}">
+      </div>
+      <div>
+        <label class="form-label">OAuth2 Redirect URL</label>
+        <input name="oauth_redirect_url" class="form-input" value="{{ config.get('oauth_redirect_url','') }}" placeholder="https://yoursite.com/discord/callback">
+      </div>
+      <div>
+        <label class="form-label">Main server name</label>
+        <input name="main_server_name" class="form-input" value="{{ config.get('main_server_name','Deup Gaming') }}">
+      </div>
+      <div>
+        <label class="form-label">Main server ID</label>
+        <input name="main_server_id" class="form-input" value="{{ config.get('main_server_id','') }}">
+      </div>
+      <div>
+        <label class="form-label">Main server invite URL</label>
+        <input name="main_server_invite_url" class="form-input" value="{{ config.get('main_server_invite_url','') }}" placeholder="https://discord.gg/...">
+      </div>
+      <div>
+        <label class="form-label">Main server enabled</label>
+        <select name="main_server_enabled" class="form-input">
+          <option value="1" {% if config.get('main_server_enabled','1')=='1' %}selected{% endif %}>Enabled</option>
+          <option value="0" {% if config.get('main_server_enabled','1')=='0' %}selected{% endif %}>Disabled</option>
+        </select>
+      </div>
+      <div>
+        <label class="form-label">Auto-join enabled</label>
+        <select name="auto_join_enabled" class="form-input">
+          <option value="1" {% if config.get('auto_join_enabled','1')=='1' %}selected{% endif %}>Enabled</option>
+          <option value="0" {% if config.get('auto_join_enabled','1')=='0' %}selected{% endif %}>Disabled</option>
+        </select>
+      </div>
+      <div>
+        <label class="form-label">Suspension on membership loss</label>
+        <select name="suspension_enabled" class="form-input">
+          <option value="1" {% if config.get('suspension_enabled','1')=='1' %}selected{% endif %}>Enabled</option>
+          <option value="0" {% if config.get('suspension_enabled','1')=='0' %}selected{% endif %}>Disabled</option>
+        </select>
+      </div>
+      <div>
+        <label class="form-label">Grace period (hours)</label>
+        <input name="grace_period_hours" class="form-input" value="{{ config.get('grace_period_hours','24') }}">
+      </div>
+      <div>
+        <label class="form-label">Verification interval (hours)</label>
+        <input name="verification_interval_hours" class="form-input" value="{{ config.get('verification_interval_hours','6') }}">
+      </div>
+      <div>
+        <label class="form-label">Log channel ID</label>
+        <input name="log_channel_id" class="form-input" value="{{ config.get('log_channel_id','') }}">
+      </div>
+      <div style="grid-column:1/-1;">
+        <button class="btn btn-primary">Save Discord configuration</button>
+      </div>
+    </form>
+  </div>
+
+  <!-- Promotion slots -->
+  <div class="card card-sm" style="margin-bottom:1.5rem;">
+    <div class="card-title">Promotion server slots (1-5)</div>
+    <p class="form-help" style="margin-bottom:1rem;">Enable and configure promotion servers. All enabled slots are mandatory for VPS creation.</p>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:1rem;">
+      {% for slot in slots %}
+      <div style="border:1px solid var(--border);border-radius:var(--radius);padding:1rem;background:var(--bg-1);">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:.75rem;">
+          <div style="font-weight:600;">Slot {{ slot.slot_number }}</div>
+          <span class="badge {{ 'badge-green' if slot.enabled else 'badge-grey' }}">{{ 'Enabled' if slot.enabled else 'Disabled' }}</span>
+        </div>
+        <form method="post" style="display:flex;flex-direction:column;gap:.5rem;">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <input type="hidden" name="action" value="save_slot_{{ slot.slot_number }}">
+          <label style="display:flex;align-items:center;gap:.5rem;font-size:.8rem;">
+            <input type="checkbox" name="slot_{{ slot.slot_number }}_enabled" value="1" {% if slot.enabled %}checked{% endif %}>
+            Enable this slot
+          </label>
+          <input name="slot_{{ slot.slot_number }}_name" class="form-input" placeholder="Server name" value="{{ slot.server_name or '' }}">
+          <input name="slot_{{ slot.slot_number }}_id" class="form-input" placeholder="Discord server ID" value="{{ slot.server_id or '' }}">
+          <input name="slot_{{ slot.slot_number }}_invite" class="form-input" placeholder="Invite URL (https://discord.gg/...)" value="{{ slot.invite_url or '' }}">
+          <div style="display:flex;gap:.5rem;margin-top:.5rem;">
+            <button class="btn btn-primary btn-sm">Save slot {{ slot.slot_number }}</button>
+            <button type="button" class="btn btn-ghost btn-sm" onclick="testSlot({{ slot.slot_number }})">Test</button>
+          </div>
+        </form>
+        {% if slot.server_id %}
+        <div style="font-size:.7rem;color:var(--text-3);margin-top:.5rem;">
+          Status: {{ slot.last_check_status or 'unknown' }}
+          {% if slot.verified_user_count %} &middot; {{ slot.verified_user_count }} verified users{% endif %}
+        </div>
+        {% endif %}
+      </div>
+      {% endfor %}
+    </div>
+  </div>
+
+  <!-- Config help -->
+  <div class="card card-sm" style="margin-top:1rem;">
+    <div class="card-title">Setup checklist</div>
+    <ol style="font-size:.82rem;color:var(--text-2);padding-left:1.25rem;line-height:1.8;">
+      <li>Create a Discord application at <a href="https://discord.com/developers/applications" target="_blank" style="color:var(--accent);">discord.com/developers/applications</a></li>
+      <li>Create a bot under the application → copy the Bot Token</li>
+      <li>Enable <strong>Server Members Intent</strong> in the bot settings (Privileged Gateway Intents)</li>
+      <li>Set OAuth2 redirect URL to <code>{{ config.get('oauth_redirect_url', 'your-panel-url/discord/callback') }}</code></li>
+      <li>Add bot to your servers with <code>bot</code> + <code>applications.commands</code> scopes</li>
+      <li>Fill in all fields above and click Save</li>
+      <li>Configure promotion slots (1-5) with server IDs and invite URLs</li>
+      <li>Test bot connection above</li>
+    </ol>
+  </div>
+</div>
+
+<script>
+function testSlot(slotNum) {
+  const form = document.createElement('form');
+  form.method = 'POST';
+  form.action = '{{ url_for("admin_discord") }}';
+  const csrf = document.createElement('input');
+  csrf.type = 'hidden'; csrf.name = 'csrf_token'; csrf.value = '{{ csrf_token() }}';
+  form.appendChild(csrf);
+  const action = document.createElement('input');
+  action.type = 'hidden'; action.name = 'action'; action.value = 'test_slot';
+  form.appendChild(action);
+  const slot = document.createElement('input');
+  slot.type = 'hidden'; slot.name = 'slot_number'; slot.value = slotNum;
+  form.appendChild(slot);
+  document.body.appendChild(form);
+  form.submit();
+}
+</script>
+{% endblock %}

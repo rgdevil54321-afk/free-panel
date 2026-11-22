@@ -74,6 +74,83 @@ CREATE TABLE IF NOT EXISTS broadcast (
 CREATE TABLE IF NOT EXISTS panel_config (
     key TEXT PRIMARY KEY, value TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS discord_config (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS discord_links (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL UNIQUE,
+    discord_id TEXT NOT NULL UNIQUE,
+    discord_username TEXT,
+    discord_discriminator TEXT,
+    discord_avatar TEXT,
+    oauth_token_encrypted TEXT,
+    oauth_refresh_token_encrypted TEXT,
+    oauth_expires_at INTEGER DEFAULT 0,
+    linked_at INTEGER NOT NULL,
+    last_verified_at INTEGER DEFAULT 0,
+    status TEXT DEFAULT 'linked',
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS discord_membership (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    server_type TEXT NOT NULL,
+    server_id TEXT NOT NULL,
+    slot_number INTEGER DEFAULT 0,
+    is_member INTEGER DEFAULT 0,
+    last_checked_at INTEGER DEFAULT 0,
+    check_count INTEGER DEFAULT 0,
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+    UNIQUE(user_id, server_type, server_id)
+);
+CREATE TABLE IF NOT EXISTS discord_promotion_slots (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    slot_number INTEGER NOT NULL UNIQUE,
+    enabled INTEGER DEFAULT 0,
+    server_name TEXT DEFAULT '',
+    server_id TEXT DEFAULT '',
+    invite_url TEXT DEFAULT '',
+    last_check_at INTEGER DEFAULT 0,
+    last_check_status TEXT DEFAULT 'unknown',
+    verified_user_count INTEGER DEFAULT 0,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS discord_verification_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    event_type TEXT NOT NULL,
+    server_type TEXT,
+    server_id TEXT,
+    status TEXT NOT NULL,
+    details TEXT,
+    created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS discord_membership_suspensions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    vps_id INTEGER NOT NULL,
+    server_type TEXT NOT NULL,
+    server_id TEXT NOT NULL,
+    server_name TEXT,
+    reason TEXT NOT NULL,
+    suspended_at INTEGER NOT NULL,
+    restored_at INTEGER DEFAULT 0,
+    is_active INTEGER DEFAULT 1,
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY(vps_id) REFERENCES vps(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS discord_audit_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    admin_id INTEGER,
+    action TEXT NOT NULL,
+    target_user_id INTEGER,
+    target_server_id TEXT,
+    details TEXT,
+    created_at INTEGER NOT NULL
+);
 """
 
 

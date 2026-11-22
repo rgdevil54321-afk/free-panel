@@ -412,10 +412,12 @@
   </a>
   <div class="nav-links">
     <a href="{{ url_for('dashboard') }}" class="{{ 'active' if request.endpoint == 'dashboard' }}">Dashboard</a>
+    <a href="{{ url_for('discord_page') }}" class="{{ 'active' if request.endpoint == 'discord_page' }}">Discord</a>
     {% if current_user.is_admin %}
     <a href="{{ url_for('admin') }}" class="{{ 'active' if request.endpoint == 'admin' }}">Admin</a>
     <a href="{{ url_for('admin_nodes') }}" class="{{ 'active' if request.endpoint == 'admin_nodes' }}">Nodes</a>
     <a href="{{ url_for('admin_config') }}" class="{{ 'active' if request.endpoint == 'admin_config' }}">Config</a>
+    <a href="{{ url_for('admin_discord') }}" class="{{ 'active' if request.endpoint == 'admin_discord' }}">Discord Admin</a>
     {% endif %}
     <a href="{{ url_for('logout') }}" class="nav-sign-out">Sign out</a>
   </div>
