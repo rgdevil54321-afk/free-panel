@@ -437,7 +437,8 @@ def get_enabled_promotion_slots() -> list[dict]:
 
 
 def update_promotion_slot(slot_number: int, enabled: int = None, server_name: str = None,
-                          server_id: str = None, invite_url: str = None) -> bool:
+                          server_id: str = None, invite_url: str = None,
+                          last_check_status: str = None, last_check_at: int = None) -> bool:
     """Update a promotion slot."""
     db = get_db()
     fields, vals = [], []
@@ -449,6 +450,10 @@ def update_promotion_slot(slot_number: int, enabled: int = None, server_name: st
         fields.append("server_id=?"); vals.append(server_id)
     if invite_url is not None:
         fields.append("invite_url=?"); vals.append(invite_url)
+    if last_check_status is not None:
+        fields.append("last_check_status=?"); vals.append(last_check_status)
+    if last_check_at is not None:
+        fields.append("last_check_at=?"); vals.append(int(last_check_at))
     fields.append("updated_at=?"); vals.append(int(time.time()))
     if fields:
         vals.append(slot_number)

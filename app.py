@@ -1402,10 +1402,16 @@ def vps_stats_summary():
 @app.route("/discord")
 @login_required
 def discord_page():
-    status = discord_mod.get_user_discord_status(current_user.id)
-    required_servers = discord_mod.get_required_servers()
-    oauth_url = discord_mod.get_oauth_url(current_user.id)
-    config = discord_mod.get_discord_config()
+    try:
+        status = discord_mod.get_user_discord_status(current_user.id)
+        required_servers = discord_mod.get_required_servers()
+        oauth_url = discord_mod.get_oauth_url(current_user.id)
+        config = discord_mod.get_discord_config()
+    except Exception:
+        app.logger.exception("discord_page failed")
+        status = {"linked": False, "verified": False, "main_server": {}, "promotion_servers": []}
+        required_servers, oauth_url, config = [], "", {}
+        flash("Could not load Discord status. Please try again.")
     return render_template("discord.html", status=status, required_servers=required_servers,
                            oauth_url=oauth_url, config=config)
 
@@ -1505,59 +1511,77 @@ def discord_disconnect():
 def admin_discord():
     if not current_user.is_admin:
         return "Forbidden", 403
-    db = get_db()
     if request.method == "POST":
         action = request.form.get("action", "")
-        if action == "save_config":
-            config_keys = ["bot_token", "application_id", "client_id", "client_secret",
-                           "oauth_redirect_url", "main_server_id", "main_server_invite_url",
-                           "main_server_name", "main_server_enabled", "auto_join_enabled",
-                           "suspension_enabled", "grace_period_hours",
-                           "verification_interval_hours", "log_channel_id"]
-            config = {}
-            for key in config_keys:
-                val = request.form.get(key, "").strip()
-                config[key] = val
-            discord_mod.update_discord_config(config, current_user.id)
-            flash("Discord configuration saved")
-        elif action.startswith("save_slot_"):
-            slot_num = int(action.split("_")[-1])
-            enabled = 1 if request.form.get(f"slot_{slot_num}_enabled") else 0
-            discord_mod.update_promotion_slot(
-                slot_num,
-                enabled=enabled,
-                server_name=request.form.get(f"slot_{slot_num}_name", "").strip(),
-                server_id=request.form.get(f"slot_{slot_num}_id", "").strip(),
-                invite_url=request.form.get(f"slot_{slot_num}_invite", "").strip(),
-            )
-            flash(f"Promotion slot {slot_num} updated")
-        elif action == "test_connection":
-            ok, msg = discord_mod.check_bot_connection()
-            flash(f"Bot connection: {msg}")
-        elif action == "test_slot":
-            slot_num = int(request.form.get("slot_number", 0))
-            ok, msg = discord_mod.test_promotion_slot(slot_num)
-            flash(f"Slot {slot_num}: {msg}")
-        db.commit()
+        try:
+            if action == "save_config":
+                config_keys = ["bot_token", "application_id", "client_id", "client_secret",
+                               "oauth_redirect_url", "main_server_id", "main_server_invite_url",
+                               "main_server_name", "main_server_enabled", "auto_join_enabled",
+                               "suspension_enabled", "grace_period_hours",
+                               "verification_interval_hours", "log_channel_id"]
+                config = {}
+                for key in config_keys:
+                    val = request.form.get(key, "").strip()
+                    config[key] = val
+                discord_mod.update_discord_config(config, current_user.id)
+                flash("Discord configuration saved")
+            elif action.startswith("save_slot_"):
+                slot_num = int(action.split("_")[-1])
+                enabled = 1 if request.form.get(f"slot_{slot_num}_enabled") else 0
+                discord_mod.update_promotion_slot(
+                    slot_num,
+                    enabled=enabled,
+                    server_name=request.form.get(f"slot_{slot_num}_name", "").strip(),
+                    server_id=request.form.get(f"slot_{slot_num}_id", "").strip(),
+                    invite_url=request.form.get(f"slot_{slot_num}_invite", "").strip(),
+                )
+                flash(f"Promotion slot {slot_num} updated")
+            elif action == "test_connection":
+                ok, msg = discord_mod.check_bot_connection()
+                flash(f"Bot connection: {msg}")
+            elif action == "test_slot":
+                slot_num = int(request.form.get("slot_number", 0))
+                ok, msg = discord_mod.test_promotion_slot(slot_num)
+                flash(f"Slot {slot_num}: {msg}")
+        except Exception as e:
+            app.logger.exception("admin_discord POST failed")
+            flash(f"Action failed: {e}")
         return redirect(url_for("admin_discord"))
 
-    config = discord_mod.get_discord_config()
-    slots = discord_mod.get_promotion_slots()
-    bot_ok, bot_msg = discord_mod.check_bot_connection()
-    # Stats
-    db = get_db()
-    total_linked = db.execute("SELECT COUNT(*) FROM discord_links WHERE status='linked'").fetchone()[0]
-    verified_count = 0
-    for link in db.execute("SELECT user_id FROM discord_links WHERE status='linked'").fetchall():
-        # Quick check without full verification
-        verified_count += 1
-    active_suspensions = db.execute(
-        "SELECT COUNT(*) FROM discord_membership_suspensions WHERE is_active=1"
-    ).fetchone()[0]
-    db.close()
+    # GET
+    try:
+        config = discord_mod.get_discord_config()
+        slots = discord_mod.get_promotion_slots()
+    except Exception as e:
+        app.logger.exception("admin_discord: failed to load config/slots")
+        flash(f"Could not load Discord settings: {e}")
+        config, slots = {}, []
+
+    # Use the last stored bot status instead of hitting the Discord API on every load.
+    bot_status = config.get("bot_status", "unknown")
+    bot_ok = bot_status == "connected"
+    bot_msg = ("Connected (last successful check)" if bot_ok
+               else "Not verified — use Test connection")
+
+    total_linked = 0
+    active_suspensions = 0
+    try:
+        db = get_db()
+        try:
+            total_linked = db.execute("SELECT COUNT(*) FROM discord_links WHERE status='linked'").fetchone()[0]
+            active_suspensions = db.execute(
+                "SELECT COUNT(*) FROM discord_membership_suspensions WHERE is_active=1"
+            ).fetchone()[0]
+        finally:
+            db.close()
+    except Exception:
+        app.logger.exception("admin_discord: stats query failed")
+
     return render_template("admin_discord.html", config=config, slots=slots,
                            bot_ok=bot_ok, bot_msg=bot_msg,
                            total_linked=total_linked, active_suspensions=active_suspensions)
+
 
 
 # ── YouTube Integration ───────────────────────────────────────────────────────
@@ -1565,9 +1589,16 @@ def admin_discord():
 @app.route("/youtube")
 @login_required
 def youtube_page():
-    status = youtube_mod.get_user_youtube_status(current_user.id)
-    oauth_url = youtube_mod.get_oauth_url(current_user.id)
-    config = youtube_mod.get_youtube_config()
+    try:
+        status = youtube_mod.get_user_youtube_status(current_user.id)
+        oauth_url = youtube_mod.get_oauth_url(current_user.id)
+        config = youtube_mod.get_youtube_config()
+    except Exception:
+        app.logger.exception("youtube_page failed")
+        status = {"linked": False, "verified": False, "required": False,
+                  "required_channel_title": "Deup Gaming", "channel_url": ""}
+        oauth_url, config = "", {}
+        flash("Could not load YouTube status. Please try again.")
     return render_template("youtube.html", status=status, oauth_url=oauth_url, config=config)
 
 
@@ -1649,34 +1680,50 @@ def admin_youtube():
         return "Forbidden", 403
     if request.method == "POST":
         action = request.form.get("action", "")
-        if action == "save_config":
-            config_keys = ["client_id", "client_secret", "oauth_redirect_url",
-                           "channel_id", "channel_title", "channel_url",
-                           "required", "suspension_enabled", "grace_period_hours",
-                           "verification_interval_hours"]
-            config = {}
-            for key in config_keys:
-                val = request.form.get(key, "").strip()
-                config[key] = val
-            youtube_mod.update_youtube_config(config, current_user.id)
-            flash("YouTube configuration saved")
-        elif action == "test_connection":
-            ok, msg = youtube_mod.test_connection()
-            flash(f"YouTube API: {msg}")
-        db = get_db()
-        db.commit()
+        try:
+            if action == "save_config":
+                config_keys = ["client_id", "client_secret", "oauth_redirect_url",
+                               "channel_id", "channel_title", "channel_url",
+                               "required", "suspension_enabled", "grace_period_hours",
+                               "verification_interval_hours"]
+                config = {}
+                for key in config_keys:
+                    val = request.form.get(key, "").strip()
+                    config[key] = val
+                youtube_mod.update_youtube_config(config, current_user.id)
+                flash("YouTube configuration saved")
+            elif action == "test_connection":
+                ok, msg = youtube_mod.test_connection()
+                youtube_mod.set_config("status", "connected" if ok else "disconnected")
+                flash(f"YouTube API: {msg}")
+        except Exception as e:
+            app.logger.exception("admin_youtube POST failed")
+            flash(f"Action failed: {e}")
         return redirect(url_for("admin_youtube"))
 
-    config = youtube_mod.get_youtube_config()
-    status, msg = youtube_mod.test_connection()
+    try:
+        config = youtube_mod.get_youtube_config()
+    except Exception as e:
+        app.logger.exception("admin_youtube: failed to load config")
+        flash(f"Could not load YouTube settings: {e}")
+        config = {}
+
+    yt_status = config.get("status", "disconnected")
+    bot_ok = yt_status == "connected"
+    bot_msg = ("Connected (last successful check)" if bot_ok
+               else "Not verified — use Test connection")
+
     total_linked = 0
     try:
         db = get_db()
-        total_linked = db.execute("SELECT COUNT(*) FROM youtube_links WHERE status='linked'").fetchone()[0]
-        db.close()
+        try:
+            total_linked = db.execute("SELECT COUNT(*) FROM youtube_links WHERE status='linked'").fetchone()[0]
+        finally:
+            db.close()
     except Exception:
-        pass
-    return render_template("admin_youtube.html", config=config, bot_ok=status, bot_msg=msg,
+        app.logger.exception("admin_youtube: stats query failed")
+
+    return render_template("admin_youtube.html", config=config, bot_ok=bot_ok, bot_msg=bot_msg,
                            total_linked=total_linked)
 
 
