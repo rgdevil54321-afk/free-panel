@@ -778,4 +778,4 @@ def get_channel_info(channel_id: str) -> dict | None:
     url = get_config("channel_url", "")
     return {"id": channel_id, "title": title, "url": url}
 PYEOF
-PYEOF
+

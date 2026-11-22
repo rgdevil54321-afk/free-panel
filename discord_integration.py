@@ -975,4 +975,4 @@ def get_user_discord_status(user_id: int) -> dict:
         "last_verified_at": link["last_verified_at"],
     }
 PYEOF
-PYEOF
+
