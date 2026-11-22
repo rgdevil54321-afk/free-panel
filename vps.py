@@ -581,19 +581,25 @@ def _install_openssh_in_chroot(root: str) -> bool:
       1. Copy sshd + libs from the host (fastest, works if host has openssh-server)
       2. apt-get install inside the chroot (fallback if host lacks sshd)
     """
-    sshd_ok = os.path.isfile(os.path.join(root, "usr", "sbin", "sshd"))
-    libcrypto = None
-    for cand in (
-        "usr/lib/x86_64-linux-gnu/libcrypto.so.3",
-        "usr/lib/aarch64-linux-gnu/libcrypto.so.3",
-        "usr/lib/x86_64-linux-gnu/libcrypto.so.1.1",
-        "usr/lib/aarch64-linux-gnu/libcrypto.so.1.1",
-    ):
-        if os.path.isfile(os.path.join(root, cand)):
-            libcrypto = cand
-            break
-    if sshd_ok and libcrypto:
-        return True
+    # If sshd is present, verify it actually runs (glibc mismatch can make a
+    # copied binary fail with "symbol lookup error" even though the file exists).
+    sshd_path = os.path.join(root, "usr", "sbin", "sshd")
+    if os.path.isfile(sshd_path):
+        try:
+            test = subprocess.run(
+                ["chroot", root, "/usr/sbin/sshd", "-t"],
+                capture_output=True, text=True, timeout=30, env=CHROOT_ENV,
+            )
+            if test.returncode == 0:
+                return True
+            print("[base] host sshd present but unusable ({}); falling back to apt-get install".format((test.stderr or "").strip()[:200]))
+        except Exception as e:
+            print("[base] sshd test failed: {}".format(e))
+        # Remove the broken binary so method 2 can install a compatible one.
+        try:
+            os.remove(sshd_path)
+        except Exception:
+            pass
 
     # network config inside the chroot
     try:
