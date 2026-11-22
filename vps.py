@@ -533,11 +533,23 @@ def can_create_vps():
 # ── base rootfs ─────────────────────────────────────────────────────────────
 
 def base_rootfs_ready() -> bool:
-    return (
+    ready = (
         os.path.isdir(BASE_ROOT)
         and os.path.isfile(os.path.join(BASE_ROOT, "bin", "bash"))
         and os.path.isfile(os.path.join(BASE_ROOT, "usr", "sbin", "sshd"))
     )
+    if not ready:
+        return False
+    # Ensure the sshd shared library is present (not just the binary).
+    for cand in (
+        "usr/lib/x86_64-linux-gnu/libcrypto.so.3",
+        "usr/lib/aarch64-linux-gnu/libcrypto.so.3",
+        "usr/lib/x86_64-linux-gnu/libcrypto.so.1.1",
+        "usr/lib/aarch64-linux-gnu/libcrypto.so.1.1",
+    ):
+        if os.path.isfile(os.path.join(BASE_ROOT, cand)):
+            return True
+    return False
 
 
 def _download(url: str, dst: str, timeout: int = 60) -> bool:
@@ -569,7 +581,18 @@ def _install_openssh_in_chroot(root: str) -> bool:
       1. Copy sshd + libs from the host (fastest, works if host has openssh-server)
       2. apt-get install inside the chroot (fallback if host lacks sshd)
     """
-    if os.path.isfile(os.path.join(root, "usr", "sbin", "sshd")):
+    sshd_ok = os.path.isfile(os.path.join(root, "usr", "sbin", "sshd"))
+    libcrypto = None
+    for cand in (
+        "usr/lib/x86_64-linux-gnu/libcrypto.so.3",
+        "usr/lib/aarch64-linux-gnu/libcrypto.so.3",
+        "usr/lib/x86_64-linux-gnu/libcrypto.so.1.1",
+        "usr/lib/aarch64-linux-gnu/libcrypto.so.1.1",
+    ):
+        if os.path.isfile(os.path.join(root, cand)):
+            libcrypto = cand
+            break
+    if sshd_ok and libcrypto:
         return True
 
     # network config inside the chroot
@@ -869,10 +892,20 @@ def ensure_base_rootfs(verbose: bool = True) -> bool:
 
 
 def base_rootfs_ready_path(root: str) -> bool:
-    return (
+    if not (
         os.path.isfile(os.path.join(root, "bin", "bash"))
         and os.path.isfile(os.path.join(root, "usr", "sbin", "sshd"))
-    )
+    ):
+        return False
+    for cand in (
+        "usr/lib/x86_64-linux-gnu/libcrypto.so.3",
+        "usr/lib/aarch64-linux-gnu/libcrypto.so.3",
+        "usr/lib/x86_64-linux-gnu/libcrypto.so.1.1",
+        "usr/lib/aarch64-linux-gnu/libcrypto.so.1.1",
+    ):
+        if os.path.isfile(os.path.join(root, cand)):
+            return True
+    return False
 
 
 # ── per-VPS setup ───────────────────────────────────────────────────────────
