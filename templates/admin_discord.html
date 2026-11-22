@@ -29,10 +29,19 @@
         <input type="hidden" name="action" value="test_connection">
         <button class="btn btn-ghost btn-sm">Test connection</button>
       </form>
+      <form method="post" style="margin:0;" action="{{ url_for('admin_discord') }}"
+            onsubmit="return confirm('Clear the stored bot token and client secret? You will need to paste them again.')">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="action" value="clear_secrets">
+        <button class="btn btn-ghost btn-sm" style="color:var(--danger);">Clear secrets</button>
+      </form>
     </div>
     <div style="margin-top:.75rem;font-size:.7rem;color:var(--text-3);">
       Linked users: {{ total_linked }} &middot; Active suspensions: {{ active_suspensions }}
     </div>
+    {% if token_info %}
+    <div style="margin-top:.35rem;font-size:.7rem;font-family:var(--mono);color:var(--text-3);">{{ token_info }}</div>
+    {% endif %}
   </div>
 
   <!-- Discord config -->
@@ -44,6 +53,7 @@
       <div>
         <label class="form-label">Bot token</label>
         <input name="bot_token" class="form-input" type="password" value=""
+               autocomplete="new-password" spellcheck="false"
                placeholder="{{ 'Token saved — leave blank to keep' if config.get('bot_token') else 'Bot token' }}">
       </div>
       <div>

@@ -1526,6 +1526,10 @@ def admin_discord():
                     config[key] = val
                 discord_mod.update_discord_config(config, current_user.id)
                 flash("Discord configuration saved")
+            elif action == "clear_secrets":
+                discord_mod.set_config("bot_token", "")
+                discord_mod.set_config("client_secret", "")
+                flash("Stored bot token and client secret cleared. Paste new ones and save.")
             elif action.startswith("save_slot_"):
                 slot_num = int(action.split("_")[-1])
                 enabled = 1 if request.form.get(f"slot_{slot_num}_enabled") else 0
@@ -1563,6 +1567,10 @@ def admin_discord():
     bot_ok = bot_status == "connected"
     bot_msg = ("Connected (last successful check)" if bot_ok
                else "Not verified — use Test connection")
+    try:
+        token_info = discord_mod.get_bot_token_info()
+    except Exception:
+        token_info = ""
 
     total_linked = 0
     active_suspensions = 0
@@ -1580,6 +1588,7 @@ def admin_discord():
 
     return render_template("admin_discord.html", config=config, slots=slots,
                            bot_ok=bot_ok, bot_msg=bot_msg,
+                           token_info=token_info,
                            total_linked=total_linked, active_suspensions=active_suspensions)
 
 

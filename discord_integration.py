@@ -10,6 +10,7 @@ never exposed to the frontend.
 
 import os
 import json
+import re
 import time
 import sqlite3
 import secrets
@@ -284,7 +285,7 @@ def get_oauth_url(user_id: int) -> str:
 def exchange_code_for_token(code: str) -> dict | None:
     """Exchange authorization code for access token."""
     client_id = get_config("client_id")
-    client_secret = _decrypt_token(get_config("client_secret")) or get_config("client_secret")
+    client_secret = _get_client_secret()
     redirect_url = get_config("oauth_redirect_url")
     if not client_id or not client_secret or not redirect_url:
         return None
@@ -327,19 +328,61 @@ def get_discord_user(access_token: str) -> dict | None:
 
 # ── Discord bot API helpers ────────────────────────────────────────────────
 
+_TOKEN_RE = re.compile(r"^[A-Za-z0-9_\-\.]{50,}$")
+# Discord OAuth2 client secrets are 32 alphanumeric characters.
+_SECRET_RE = re.compile(r"^[A-Za-z0-9_\-]{32}$")
+
+
+def _decrypt_layers(raw: str, looks_valid) -> str:
+    """Return the plaintext, peeling 0..3 layers of XOR/base64 encryption."""
+    raw = (raw or "").strip()
+    if looks_valid(raw):
+        return raw
+    cur = raw
+    for _ in range(3):
+        dec = _decrypt_token(cur)
+        if not dec:
+            break
+        dec = dec.strip()
+        if looks_valid(dec):
+            return dec
+        cur = dec
+    return ""
+
+
+def _looks_like_bot_token(s: str) -> bool:
+    return bool(s) and bool(_TOKEN_RE.match(s)) and s.count(".") >= 2
+
+
+def _looks_like_client_secret(s: str) -> bool:
+    return bool(s) and bool(_SECRET_RE.match(s))
+
+
 def _get_bot_token() -> str:
     """Return the plaintext bot token.
 
-    Tokens are stored encrypted by update_discord_config(); decrypt here.
-    Falls back to the raw value for legacy plaintext entries.
+    Values are stored encrypted by update_discord_config(). Older builds could
+    encrypt the same value twice (the form echoed the ciphertext back and the
+    admin re-saved), so peel up to 3 layers. A real Discord token is printable,
+    >=50 chars and has two dots.
     """
     raw = get_config("bot_token")
     if not raw:
         return ""
-    dec = _decrypt_token(raw)
-    if dec and len(dec) > 40 and all(32 <= ord(c) < 127 for c in dec):
-        return dec
-    return raw
+    tok = _decrypt_layers(raw, _looks_like_bot_token)
+    # Common copy/paste mistakes: surrounding quotes, or an "Bot " prefix.
+    tok = tok.strip().strip('"').strip("'")
+    if tok[:4].lower() == "bot ":
+        tok = tok[4:].strip()
+    return tok
+
+
+def _get_client_secret() -> str:
+    """Return the plaintext OAuth client secret (handles legacy double-encryption)."""
+    raw = get_config("client_secret")
+    if not raw:
+        return ""
+    return _decrypt_layers(raw, _looks_like_client_secret)
 
 
 def _bot_headers():
@@ -347,18 +390,35 @@ def _bot_headers():
     return {"Authorization": f"Bot {token}", "Content-Type": "application/json"}
 
 
+def get_bot_token_info() -> str:
+    """Non-secret diagnostics about the stored bot token, for the admin page."""
+    tok = _get_bot_token()
+    if not tok:
+        return "No bot token stored (or it could not be decoded — paste it again and save)"
+    return (f"Token stored — {len(tok)} chars, format "
+            + ("OK" if _looks_like_bot_token(tok) else "unexpected — paste the token again"))
+
+
 def check_bot_connection() -> tuple[bool, str]:
     """Check if the Discord bot token is valid and connected."""
     token = _get_bot_token()
     if not token:
-        return False, "No bot token configured"
+        return False, "No bot token configured (or the saved token could not be decoded — paste it again and save)"
     try:
         resp = requests.get(f"{DISCORD_API}/users/@me", headers=_bot_headers(), timeout=15)
         if resp.status_code == 200:
             data = resp.json()
             set_config("bot_status", "connected")
             return True, f"Connected as {data.get('username', 'unknown')}#{data.get('discriminator', '0')}"
-        return False, f"Discord API returned {resp.status_code}"
+        # Show Discord's own message (never the token) so 401s are diagnosable.
+        try:
+            detail = resp.json().get("message", "")
+        except Exception:
+            detail = ""
+        return False, (f"Discord API returned {resp.status_code}"
+                       + (f": {detail}" if detail else "")
+                       + f" (decoded token length {len(token)}; format "
+                       + ("ok" if _looks_like_bot_token(token) else "unexpected") + ")")
     except Exception as e:
         set_config("bot_status", "disconnected")
         return False, str(e)
