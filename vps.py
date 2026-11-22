@@ -661,6 +661,26 @@ def _install_openssh_in_chroot(root: str) -> bool:
 
         if copy_binary(sshd):
             copy_binary("/usr/lib/openssh/sftp-server")
+            # OpenSSH's privilege separation requires an 'sshd' user/group in
+            # /etc/passwd and /etc/group. The minimal Ubuntu base image does not
+            # ship one, so create it here (matches what openssh-server's
+            # postinst does).
+            try:
+                passwd = os.path.join(root, "etc", "passwd")
+                group = os.path.join(root, "etc", "group")
+                shadow = os.path.join(root, "etc", "shadow")
+                if os.path.isfile(passwd) and "sshd:" not in open(passwd).read():
+                    with open(passwd, "a") as f:
+                        f.write("sshd:x:107:65534::/run/sshd:/bin/false\n")
+                if os.path.isfile(group) and "sshd:" not in open(group).read():
+                    with open(group, "a") as f:
+                        f.write("sshd:x:107:\n")
+                if os.path.isfile(shadow) and "sshd:" not in open(shadow).read():
+                    with open(shadow, "a") as f:
+                        f.write("sshd:*:19000:0:99999:7:::\n")
+                os.makedirs(os.path.join(root, "run", "sshd"), exist_ok=True)
+            except Exception as e:
+                print(f"[base] could not create sshd user: {e}")
             # minimal sshd_config
             cfgdir = os.path.join(root, "etc", "ssh")
             os.makedirs(cfgdir, exist_ok=True)
