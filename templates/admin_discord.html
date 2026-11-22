@@ -43,7 +43,8 @@
       <input type="hidden" name="action" value="save_config">
       <div>
         <label class="form-label">Bot token</label>
-        <input name="bot_token" class="form-input" type="password" value="{{ config.get('bot_token','') }}" placeholder="Bot token (stored encrypted)">
+        <input name="bot_token" class="form-input" type="password" value=""
+               placeholder="{{ 'Token saved — leave blank to keep' if config.get('bot_token') else 'Bot token' }}">
       </div>
       <div>
         <label class="form-label">Application ID</label>
@@ -55,7 +56,8 @@
       </div>
       <div>
         <label class="form-label">Client Secret</label>
-        <input name="client_secret" class="form-input" type="password" value="{{ config.get('client_secret','') }}">
+        <input name="client_secret" class="form-input" type="password" value=""
+               placeholder="{{ 'Secret saved — leave blank to keep' if config.get('client_secret') else 'Client secret' }}">
       </div>
       <div>
         <label class="form-label">OAuth2 Redirect URL</label>

@@ -747,26 +747,41 @@ def update_youtube_config(config: dict, admin_id: int = None):
 
 
 def test_connection() -> tuple[bool, str]:
-    """Test the YouTube API connection with the configured credentials."""
+    """Test the Google OAuth2 credentials.
+
+    Google has no client_credentials grant, so we send a deliberately invalid
+    authorization_code request: a well-formed client pair answers
+    ``invalid_grant`` while bad credentials answer ``invalid_client``.
+    """
     client_id = get_config("client_id")
     client_secret = get_config("client_secret")
     if not client_id or not client_secret:
         return False, "Client ID and Client Secret are required"
-    # Test by getting an access token with client credentials
     try:
         resp = requests.post(
             GOOGLE_OAUTH_TOKEN,
             data={
                 "client_id": client_id,
                 "client_secret": client_secret,
-                "grant_type": "client_credentials",
+                "grant_type": "authorization_code",
+                "code": "connectivity-test",
+                "redirect_uri": get_config("oauth_redirect_url") or "http://localhost",
             },
             headers={"Content-Type": "application/x-www-form-urlencoded"},
             timeout=15,
         )
-        if resp.status_code == 200:
-            return True, "Credentials valid"
-        return False, f"API returned {resp.status_code}: {resp.text[:200]}"
+        try:
+            body = resp.json()
+        except Exception:
+            body = {}
+        err = (body.get("error") or "").lower()
+        if err == "invalid_grant":
+            return True, "Credentials valid (client ID/secret accepted by Google)"
+        if err == "invalid_client":
+            return False, "Invalid client ID or client secret — check they match your Google OAuth client"
+        if err in ("redirect_uri_mismatch", "invalid_request"):
+            return False, f"Google rejected the request: {err} — check the OAuth2 Redirect URL matches the Google console"
+        return False, f"Google returned {resp.status_code}: {resp.text[:200]}"
     except Exception as e:
         return False, str(e)
 

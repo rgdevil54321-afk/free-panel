@@ -284,7 +284,7 @@ def get_oauth_url(user_id: int) -> str:
 def exchange_code_for_token(code: str) -> dict | None:
     """Exchange authorization code for access token."""
     client_id = get_config("client_id")
-    client_secret = get_config("client_secret")
+    client_secret = _decrypt_token(get_config("client_secret")) or get_config("client_secret")
     redirect_url = get_config("oauth_redirect_url")
     if not client_id or not client_secret or not redirect_url:
         return None
@@ -328,7 +328,18 @@ def get_discord_user(access_token: str) -> dict | None:
 # ── Discord bot API helpers ────────────────────────────────────────────────
 
 def _get_bot_token() -> str:
-    return get_config("bot_token")
+    """Return the plaintext bot token.
+
+    Tokens are stored encrypted by update_discord_config(); decrypt here.
+    Falls back to the raw value for legacy plaintext entries.
+    """
+    raw = get_config("bot_token")
+    if not raw:
+        return ""
+    dec = _decrypt_token(raw)
+    if dec and len(dec) > 40 and all(32 <= ord(c) < 127 for c in dec):
+        return dec
+    return raw
 
 
 def _bot_headers():
@@ -931,8 +942,10 @@ def update_discord_config(config: dict, admin_id: int = None):
     """Update Discord configuration."""
     for key, val in config.items():
         if key in ("bot_token", "client_secret"):
-            # Encrypt secrets
-            set_config(key, _encrypt_token(val) if val else "")
+            # Blank means "keep the existing secret" (the form never echoes it back).
+            if not val:
+                continue
+            set_config(key, _encrypt_token(val))
         else:
             set_config(key, val)
     if admin_id:
