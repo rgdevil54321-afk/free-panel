@@ -1,0 +1,110 @@
+{% extends "base.html" %}
+{% block title %}YouTube Admin — DeupGaming Admin{% endblock %}
+{% block body %}
+<div class="page">
+  <div class="page-hdr flex-b" style="margin-bottom:1.75rem;">
+    <div>
+      <h1>YouTube Subscription Manager</h1>
+      <p>Configure YouTube verification, required channel, and subscription enforcement.</p>
+    </div>
+    <a href="{{ url_for('admin') }}" class="btn btn-ghost btn-sm">← Back to Admin</a>
+  </div>
+
+  {% with messages = get_flashed_messages() %}
+    {% if messages %}
+      {% for msg in messages %}
+      <div class="alert alert-info">{{ msg }}</div>
+      {% endfor %}
+    {% endif %}
+  {% endwith %}
+
+  <!-- Bot status -->
+  <div class="card card-sm" style="margin-bottom:1.5rem;">
+    <div class="card-title">API connection</div>
+    <div style="display:flex;align-items:center;gap:1rem;flex-wrap:wrap;">
+      <span class="badge {{ 'badge-green' if bot_ok else 'badge-red' }}">{{ 'Connected' if bot_ok else 'Disconnected' }}</span>
+      <span style="font-size:.8rem;color:var(--text-2);">{{ bot_msg }}</span>
+      <form method="post" style="margin:0;" action="{{ url_for('admin_youtube') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="action" value="test_connection">
+        <button class="btn btn-ghost btn-sm">Test connection</button>
+      </form>
+    </div>
+    <div style="margin-top:.75rem;font-size:.7rem;color:var(--text-3);">
+      Linked users: {{ total_linked }}
+    </div>
+  </div>
+
+  <!-- YouTube config -->
+  <div class="card card-sm" style="margin-bottom:1.5rem;">
+    <div class="card-title">YouTube configuration</div>
+    <form method="post" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:1rem;">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+      <input type="hidden" name="action" value="save_config">
+      <div>
+        <label class="form-label">Google Client ID</label>
+        <input name="client_id" class="form-input" value="{{ config.get('client_id','') }}" placeholder="Google OAuth2 Client ID">
+      </div>
+      <div>
+        <label class="form-label">Google Client Secret</label>
+        <input name="client_secret" class="form-input" type="password" value="{{ config.get('client_secret','') }}" placeholder="Google OAuth2 Client Secret">
+      </div>
+      <div>
+        <label class="form-label">OAuth2 Redirect URL</label>
+        <input name="oauth_redirect_url" class="form-input" value="{{ config.get('oauth_redirect_url','') }}" placeholder="https://your-panel/youtube/callback">
+      </div>
+      <div>
+        <label class="form-label">Required channel ID</label>
+        <input name="channel_id" class="form-input" value="{{ config.get('channel_id','') }}" placeholder="UCxxxxxx">
+      </div>
+      <div>
+        <label class="form-label">Required channel title</label>
+        <input name="channel_title" class="form-input" value="{{ config.get('channel_title','Deup Gaming') }}">
+      </div>
+      <div>
+        <label class="form-label">Channel URL</label>
+        <input name="channel_url" class="form-input" value="{{ config.get('channel_url','') }}" placeholder="https://youtube.com/@DeupGaming">
+      </div>
+      <div>
+        <label class="form-label">Required for VPS creation</label>
+        <select name="required" class="form-input">
+          <option value="1" {% if config.get('required','1')=='1' %}selected{% endif %}>Required (must subscribe)</option>
+          <option value="0" {% if config.get('required','1')=='0' %}selected{% endif %}>Optional (not enforced)</option>
+        </select>
+      </div>
+      <div>
+        <label class="form-label">Suspension on unsubscribe</label>
+        <select name="suspension_enabled" class="form-input">
+          <option value="1" {% if config.get('suspension_enabled','1')=='1' %}selected{% endif %}>Enabled</option>
+          <option value="0" {% if config.get('suspension_enabled','1')=='0' %}selected{% endif %}>Disabled</option>
+        </select>
+      </div>
+      <div>
+        <label class="form-label">Grace period (hours)</label>
+        <input name="grace_period_hours" class="form-input" value="{{ config.get('grace_period_hours','24') }}">
+      </div>
+      <div>
+        <label class="form-label">Verification interval (hours)</label>
+        <input name="verification_interval_hours" class="form-input" value="{{ config.get('verification_interval_hours','12') }}">
+      </div>
+      <div style="grid-column:1/-1;">
+        <button class="btn btn-primary">Save YouTube configuration</button>
+      </div>
+    </form>
+  </div>
+
+  <!-- Setup checklist -->
+  <div class="card card-sm" style="margin-top:1rem;">
+    <div class="card-title">Setup checklist</div>
+    <ol style="font-size:.82rem;color:var(--text-2);padding-left:1.25rem;line-height:1.8;">
+      <li>Create a Google Cloud project at <a href="https://console.cloud.google.com" target="_blank" style="color:var(--accent);">console.cloud.google.com</a></li>
+      <li>Enable the <strong>YouTube Data API v3</strong></li>
+      <li>Create OAuth2 credentials (Web application type)</li>
+      <li>Set redirect URI to <code>{{ config.get('oauth_redirect_url', 'your-panel-url/youtube/callback') }}</code></li>
+      <li>Copy Client ID and Client Secret into the fields above</li>
+      <li>Set your YouTube channel ID and URL</li>
+      <li>Save configuration and test connection</li>
+    </ol>
+  </div>
+</div>
+{% endblock %}

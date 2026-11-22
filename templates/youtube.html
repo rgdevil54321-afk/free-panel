@@ -1,0 +1,117 @@
+{% extends "base.html" %}
+{% block title %}YouTube — DeupGaming{% endblock %}
+{% block body %}
+<div class="page">
+  <div class="page-hdr" style="margin-bottom:1.5rem;">
+    <h1>YouTube Subscription Verification</h1>
+    <p>Link your YouTube account and subscribe to Deup Gaming to create VPS instances.</p>
+  </div>
+
+  {% with messages = get_flashed_messages() %}
+    {% if messages %}
+      {% for msg in messages %}
+      <div class="alert alert-info">{{ msg }}</div>
+      {% endfor %}
+    {% endif %}
+  {% endwith %}
+
+  {% if not status.linked %}
+  <!-- Not linked -->
+  <div class="card" style="text-align:center;padding:2.5rem;">
+    <div style="font-size:2.5rem;margin-bottom:1rem;">🎬</div>
+    <h2 style="font-size:1.1rem;font-weight:600;margin-bottom:.5rem;">Link your YouTube account</h2>
+    <p style="color:var(--text-2);font-size:.85rem;margin-bottom:1.5rem;max-width:400px;margin-left:auto;margin-right:auto;">
+      You must link your Google/YouTube account and subscribe to {{ status.required_channel_title }} before creating a VPS.
+    </p>
+    {% if oauth_url %}
+    <a href="{{ oauth_url }}" class="btn btn-primary">Link YouTube Account</a>
+    {% else %}
+    <div class="alert alert-warn">YouTube integration is not configured by admin. Contact the administrator.</div>
+    {% endif %}
+  </div>
+  {% else %}
+  <!-- Linked -->
+  <div class="card card-sm" style="margin-bottom:1.5rem;">
+    <div class="card-title">Google / YouTube account</div>
+    <div style="display:flex;align-items:center;gap:1rem;">
+      {% if status.google_avatar %}
+      <img src="{{ status.google_avatar }}" style="width:48px;height:48px;border-radius:50%;border:2px solid var(--border);" alt="avatar">
+      {% else %}
+      <div style="width:48px;height:48px;border-radius:50%;background:var(--bg-3);display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:1.2rem;">{{ status.google_name[0] if status.google_name else '?' }}</div>
+      {% endif %}
+      <div>
+        <div style="font-weight:600;">{{ status.google_name or 'Unknown' }}</div>
+        <div style="font-size:.72rem;color:var(--text-3);">{{ status.google_email }}</div>
+        {% if status.channel_title %}
+        <div style="font-size:.72rem;color:var(--text-3);margin-top:.2rem;">Channel: {{ status.channel_title }}</div>
+        {% endif %}
+      </div>
+      <div style="margin-left:auto;display:flex;gap:.5rem;">
+        <form method="post" action="{{ url_for('youtube_verify') }}" style="margin:0;">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <button class="btn btn-ghost btn-sm">Verify Subscription</button>
+        </form>
+        <form method="post" action="{{ url_for('youtube_disconnect') }}" style="margin:0;"
+              onsubmit="return confirm('Disconnect YouTube account? You will need to relink to create VPSes.')">
+          <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+          <button class="btn btn-ghost btn-sm" style="color:var(--danger);">Disconnect</button>
+        </form>
+      </div>
+    </div>
+    {% if status.last_verified_at %}
+    <div style="font-size:.7rem;color:var(--text-3);margin-top:.5rem;">Last verified: {{ status.last_verified_at | strftime }}</div>
+    {% endif %}
+  </div>
+
+  <!-- Subscription status -->
+  <div class="card card-sm">
+    <div class="card-title">Subscription requirement</div>
+    {% if not status.required %}
+    <div class="alert alert-info" style="margin-bottom:1rem;">YouTube verification is not required by admin. VPS creation is unrestricted.</div>
+    {% elif status.verified %}
+    <div class="alert alert-success" style="margin-bottom:1rem;">
+      ✓ Subscribed to {{ status.required_channel_title }} — all requirements met! You can create a VPS.
+    </div>
+    {% else %}
+    <div class="alert alert-warn" style="margin-bottom:1rem;">
+      You must subscribe to {{ status.required_channel_title }} before creating a VPS.
+    </div>
+    {% endif %}
+
+    <div style="display:flex;align-items:center;justify-content:space-between;padding:.6rem .8rem;background:var(--bg-2);border-radius:var(--r);border:1px solid var(--border);">
+      <div>
+        <div style="font-weight:500;font-size:.85rem;">{{ status.required_channel_title }}</div>
+        <div style="font-size:.7rem;color:var(--text-3);">Required YouTube channel</div>
+      </div>
+      <div style="display:flex;align-items:center;gap:.5rem;">
+        {% if status.verified %}
+        <span class="badge badge-green">✓ Subscribed</span>
+        {% else %}
+        <span class="badge badge-red">Not subscribed</span>
+        <a href="{{ status.channel_url }}" target="_blank" class="btn btn-primary btn-sm">Subscribe</a>
+        {% endif %}
+      </div>
+    </div>
+
+    {% if not status.verified and status.required %}
+    <div style="margin-top:1rem;">
+      <form method="post" action="{{ url_for('youtube_verify') }}" style="margin:0;">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <button class="btn btn-primary">Re-verify after subscribing</button>
+      </form>
+    </div>
+    {% endif %}
+  </div>
+  {% endif %}
+
+  <!-- Reauthorize -->
+  {% if status.linked and status.error %}
+  <div class="card" style="margin-top:1rem;">
+    <div class="alert alert-warn">{{ status.error }}</div>
+    {% if oauth_url %}
+    <a href="{{ oauth_url }}" class="btn btn-primary">Reauthorize YouTube</a>
+    {% endif %}
+  </div>
+  {% endif %}
+</div>
+{% endblock %}

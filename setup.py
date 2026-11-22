@@ -151,6 +151,59 @@ CREATE TABLE IF NOT EXISTS discord_audit_log (
     details TEXT,
     created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS youtube_config (
+    key TEXT PRIMARY KEY,
+    value TEXT NOT NULL DEFAULT ''
+);
+CREATE TABLE IF NOT EXISTS youtube_links (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL UNIQUE,
+    google_id TEXT NOT NULL,
+    google_email TEXT,
+    google_name TEXT,
+    google_avatar TEXT,
+    channel_id TEXT,
+    channel_title TEXT,
+    oauth_token_encrypted TEXT,
+    oauth_refresh_token_encrypted TEXT,
+    oauth_expires_at INTEGER DEFAULT 0,
+    linked_at INTEGER NOT NULL,
+    last_verified_at INTEGER DEFAULT 0,
+    status TEXT DEFAULT 'linked',
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS youtube_subscription_status (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    channel_id TEXT NOT NULL,
+    channel_title TEXT,
+    is_subscribed INTEGER DEFAULT 0,
+    last_checked_at INTEGER DEFAULT 0,
+    check_count INTEGER DEFAULT 0,
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+    UNIQUE(user_id, channel_id)
+);
+CREATE TABLE IF NOT EXISTS youtube_verification_history (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    event_type TEXT NOT NULL,
+    status TEXT NOT NULL,
+    details TEXT,
+    created_at INTEGER NOT NULL
+);
+CREATE TABLE IF NOT EXISTS youtube_subscription_suspensions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    user_id INTEGER NOT NULL,
+    vps_id INTEGER NOT NULL,
+    channel_id TEXT NOT NULL,
+    channel_title TEXT,
+    reason TEXT NOT NULL,
+    suspended_at INTEGER NOT NULL,
+    restored_at INTEGER DEFAULT 0,
+    is_active INTEGER DEFAULT 1,
+    FOREIGN KEY(user_id) REFERENCES users(id) ON DELETE CASCADE,
+    FOREIGN KEY(vps_id) REFERENCES vps(id) ON DELETE CASCADE
+);
 """
 
 

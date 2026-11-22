@@ -5,3 +5,5 @@ requests>=2.31
 pylxd>=2.3
 # Discord integration (optional, for Gateway events)
 # discord.py>=2.3
+# YouTube integration (optional, for OAuth2)
+# google-auth>=2.0

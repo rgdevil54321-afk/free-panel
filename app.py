@@ -34,6 +34,7 @@ import node_mesh
 import ip_intel
 import nat
 import discord_integration as discord_mod
+import youtube_integration as youtube_mod
 
 DB = "panel.db"
 
@@ -235,6 +236,8 @@ def init_db():
     node_mesh.init_mesh_tables(db)
     nat.init_nat_tables(db)
     discord_mod.init_discord_tables(db)
+    import youtube_integration as youtube_mod
+    youtube_mod.init_youtube_tables(db)
     db.close()
 
 
@@ -521,6 +524,12 @@ def vps_create():
     if not eligible:
         flash(f"VPS creation blocked: {reason}")
         return redirect(url_for("discord_page"))
+
+    # YouTube subscription eligibility check
+    yt_eligible, yt_reason = youtube_mod.check_vps_eligibility(current_user.id)
+    if not yt_eligible:
+        flash(f"VPS creation blocked: {yt_reason}")
+        return redirect(url_for("youtube_page"))
 
     allowed, current_count = can_create_vps()
     if not allowed:
@@ -1551,6 +1560,126 @@ def admin_discord():
                            total_linked=total_linked, active_suspensions=active_suspensions)
 
 
+# ── YouTube Integration ───────────────────────────────────────────────────────
+
+@app.route("/youtube")
+@login_required
+def youtube_page():
+    status = youtube_mod.get_user_youtube_status(current_user.id)
+    oauth_url = youtube_mod.get_oauth_url(current_user.id)
+    config = youtube_mod.get_youtube_config()
+    return render_template("youtube.html", status=status, oauth_url=oauth_url, config=config)
+
+
+@app.route("/youtube/link")
+@login_required
+def youtube_link():
+    oauth_url = youtube_mod.get_oauth_url(current_user.id)
+    if not oauth_url:
+        flash("YouTube integration not configured. Contact admin.")
+        return redirect(url_for("youtube_page"))
+    return redirect(oauth_url)
+
+
+@app.route("/youtube/callback")
+@login_required
+def youtube_callback():
+    code = request.args.get("code")
+    state = request.args.get("state")
+    if not code:
+        flash("YouTube authorization failed or was cancelled.")
+        return redirect(url_for("youtube_page"))
+    user_id = youtube_mod.validate_oauth_state(state)
+    if user_id != current_user.id:
+        flash("Invalid OAuth state. Please try again.")
+        return redirect(url_for("youtube_page"))
+    token_data = youtube_mod.exchange_code_for_token(code)
+    if not token_data:
+        flash("Failed to exchange authorization code. Please try again.")
+        return redirect(url_for("youtube_page"))
+    access_token = token_data.get("access_token")
+    refresh_token = token_data.get("refresh_token")
+    expires_in = token_data.get("expires_in", 0)
+    google_profile = youtube_mod.get_google_user(access_token)
+    if not google_profile:
+        flash("Failed to get Google profile. Please try again.")
+        return redirect(url_for("youtube_page"))
+    channel = youtube_mod.get_youtube_channel(access_token)
+    ok, msg = youtube_mod.link_youtube_account(
+        current_user.id, google_profile, channel, access_token, refresh_token, expires_in
+    )
+    if not ok:
+        flash(msg)
+        return redirect(url_for("youtube_page"))
+    flash(f"YouTube account linked: {google_profile.get('name', 'unknown')}")
+    result = youtube_mod.verify_subscription(current_user.id, force=True)
+    if result["verified"]:
+        flash("Subscription verified! You can now create a VPS.")
+    else:
+        channel_title = youtube_mod.get_config("channel_title", "Deup Gaming")
+        channel_url = youtube_mod.get_config("channel_url", "")
+        flash(f"You must subscribe to {channel_title}" + (f" ({channel_url})" if channel_url else ""))
+    return redirect(url_for("youtube_page"))
+
+
+@app.route("/youtube/verify", methods=["POST"])
+@login_required
+def youtube_verify():
+    result = youtube_mod.verify_subscription(current_user.id, force=True)
+    if result["verified"]:
+        flash("YouTube subscription verified!")
+    else:
+        channel_title = youtube_mod.get_config("channel_title", "Deup Gaming")
+        flash(f"Not subscribed to {channel_title}")
+    return redirect(url_for("youtube_page"))
+
+
+@app.route("/youtube/disconnect", methods=["POST"])
+@login_required
+def youtube_disconnect():
+    youtube_mod.unlink_youtube_account(current_user.id)
+    flash("YouTube account disconnected. You will need to relink to create VPSes.")
+    return redirect(url_for("youtube_page"))
+
+
+@app.route("/admin/youtube", methods=["GET", "POST"])
+@login_required
+def admin_youtube():
+    if not current_user.is_admin:
+        return "Forbidden", 403
+    if request.method == "POST":
+        action = request.form.get("action", "")
+        if action == "save_config":
+            config_keys = ["client_id", "client_secret", "oauth_redirect_url",
+                           "channel_id", "channel_title", "channel_url",
+                           "required", "suspension_enabled", "grace_period_hours",
+                           "verification_interval_hours"]
+            config = {}
+            for key in config_keys:
+                val = request.form.get(key, "").strip()
+                config[key] = val
+            youtube_mod.update_youtube_config(config, current_user.id)
+            flash("YouTube configuration saved")
+        elif action == "test_connection":
+            ok, msg = youtube_mod.test_connection()
+            flash(f"YouTube API: {msg}")
+        db = get_db()
+        db.commit()
+        return redirect(url_for("admin_youtube"))
+
+    config = youtube_mod.get_youtube_config()
+    status, msg = youtube_mod.test_connection()
+    total_linked = 0
+    try:
+        db = get_db()
+        total_linked = db.execute("SELECT COUNT(*) FROM youtube_links WHERE status='linked'").fetchone()[0]
+        db.close()
+    except Exception:
+        pass
+    return render_template("admin_youtube.html", config=config, bot_ok=status, bot_msg=msg,
+                           total_linked=total_linked)
+
+
 # ── Boot ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
@@ -1567,6 +1696,18 @@ if __name__ == "__main__":
     print("="*55)
     start_monitor()
     queue.start_queue_worker(_build_vps)
+    # Start YouTube reconciliation worker (periodic subscription checks)
+    try:
+        import youtube_integration as _yt
+        _yt.start_reconciliation_worker(interval_hours=12)
+    except Exception as e:
+        print(f"[YouTube] Failed to start reconciliation worker: {e}")
+    # Start Discord reconciliation worker (periodic membership checks)
+    try:
+        import discord_integration as _dc
+        _dc.start_reconciliation_worker(interval_hours=6)
+    except Exception as e:
+        print(f"[Discord] Failed to start reconciliation worker: {e}")
     _host = os.environ.get("PANEL_HOST", "0.0.0.0")
     _port = int(os.environ.get("PANEL_PORT", "5000"))
     print(f"  Panel URL : http://{_host}:{_port}")
