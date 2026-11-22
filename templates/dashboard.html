@@ -450,7 +450,7 @@ function setStar(v){
     const cmd=inp.value.trim(); if(!cmd) return;
     hist.push(cmd); hi=-1; line('# '+cmd,'t-cmd'); inp.value='';
     try{
-      const r=await fetch("{{ url_for('terminal_exec', vps_id=vps.id) }}",{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({cmd})});
+      const r=await fetch("{{ url_for('terminal_exec', vps_id=vps.id) }}",{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':'{{ csrf_token() }}'},body:JSON.stringify({cmd})});
       const d=await r.json();
       if(d.error){line('error: '+d.error,'t-err');return;}
       (d.output||'').split('\n').forEach(l=>line(l,'t-out'));
