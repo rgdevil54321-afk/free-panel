@@ -1485,39 +1485,73 @@ def sync_status(container_id: str, db_status: str) -> str:
 # ── sshx ────────────────────────────────────────────────────────────────────
 
 def _install_sshx(inst) -> bool:
-    env = {"HOME": "/root", "DEBIAN_FRONTEND": "noninteractive"}
-    find_cmd = (
-        "command -v sshx || "
-        "for p in /root/.local/bin/sshx /usr/local/bin/sshx /usr/bin/sshx; do "
-        "  [ -x \"$p\" ] && echo \"$p\" && break; done"
-    )
+    """Install the statically-linked sshx binary directly into the chroot.
+
+    We deliberately avoid 'curl | sh' and apt here: the chroot's apt is often
+    broken (Perl/base-library mismatches) and curl is absent. The sshx Linux
+    binary is statically linked (musl), so downloading it on the host and
+    copying it into the rootfs always works.
+    """
+    import platform
+    import tarfile
+    import tempfile
+    import urllib.request
+
     try:
-        check = inst.execute(["bash", "-c", find_cmd], environment=env)
-        found = (check.stdout or "").strip()
-        if found:
-            _ensure_symlinked(inst, found, env)
+        root = _path(inst.name)
+        target = os.path.join(root, "usr", "local", "bin", "sshx")
+        if os.path.isfile(target) and os.access(target, os.X_OK):
             return True
+        for p in (os.path.join(root, "root", ".local", "bin", "sshx"),
+                  os.path.join(root, "usr", "bin", "sshx")):
+            if os.path.isfile(p) and os.access(p, os.X_OK):
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                try:
+                    os.symlink(p, target)
+                except FileExistsError:
+                    pass
+                return True
 
-        curl_ok = inst.execute(["bash", "-c", "command -v curl"], environment=env)
-        if not (curl_ok.stdout or "").strip():
-            if not _apt_install_with_retry(inst, "curl", env):
+        machine = platform.machine().lower()
+        if machine in ("aarch64", "arm64"):
+            arch = "aarch64"
+        elif machine == "armv7l":
+            arch = "armv7"
+        elif machine == "armv6l":
+            arch = "arm"
+        else:
+            arch = "x86_64"
+        url = f"https://s3.amazonaws.com/sshx/sshx-{arch}-unknown-linux-musl.tar.gz"
+        cache = os.path.join(tempfile.gettempdir(), f"sshx-{arch}.tar.gz")
+        if not os.path.isfile(cache) or os.path.getsize(cache) < 100000:
+            print(f"[sshx] downloading {url}")
+            urllib.request.urlretrieve(url, cache)
+
+        with tarfile.open(cache, "r:gz") as tf:
+            member = next((m for m in tf.getmembers()
+                           if os.path.basename(m.name) == "sshx" and m.isfile()), None)
+            if member is None:
+                print("[sshx] archive has no 'sshx' binary")
                 return False
-
-        install_cmd = (
-            "curl --retry 3 --retry-delay 2 --retry-connrefused "
-            "--connect-timeout 10 -sSf https://sshx.io/get | sh"
-        )
-        for _ in range(3):
-            result = inst.execute(["bash", "-c", install_cmd], environment=env)
-            if result.exit_code == 0:
-                break
-            time.sleep(2)
-
-        check2 = inst.execute(["bash", "-c", find_cmd], environment=env)
-        found = (check2.stdout or "").strip()
-        if not found:
+            f = tf.extractfile(member)
+            data = f.read() if f else b""
+        if not data:
             return False
-        _ensure_symlinked(inst, found, env)
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(target, "wb") as out:
+            out.write(data)
+        os.chmod(target, 0o755)
+
+        # CA bundle so the static binary can verify sshx.io's TLS certificate.
+        certsrc = "/etc/ssl/certs/ca-certificates.crt"
+        if os.path.isfile(certsrc):
+            certdir = os.path.join(root, "etc", "ssl", "certs")
+            os.makedirs(certdir, exist_ok=True)
+            try:
+                shutil.copyfile(certsrc, os.path.join(certdir, "ca-certificates.crt"))
+            except Exception:
+                pass
+        print("[sshx] installed static binary into chroot")
         return True
     except Exception as e:
         print(f"[sshx install] {e}")
