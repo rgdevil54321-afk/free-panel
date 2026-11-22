@@ -974,5 +974,4 @@ def get_user_discord_status(user_id: int) -> dict:
         "missing_servers": result["missing_servers"],
         "last_verified_at": link["last_verified_at"],
     }
-PYEOF
 
