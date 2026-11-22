@@ -732,8 +732,15 @@ def link_discord_account(user_id: int, discord_profile: dict, access_token: str,
         "SELECT user_id FROM discord_links WHERE discord_id=?", (discord_id,)
     ).fetchone()
     if existing and existing["user_id"] != user_id:
-        db.close()
-        return False, "This Discord account is already linked to another panel account"
+        # If the other user no longer exists, the row is a stale orphan left by a
+        # deletion (foreign_keys is OFF). Remove it and allow the link.
+        owner_exists = db.execute(
+            "SELECT 1 FROM users WHERE id=?", (existing["user_id"],)
+        ).fetchone()
+        if owner_exists:
+            db.close()
+            return False, "This Discord account is already linked to another panel account"
+        db.execute("DELETE FROM discord_links WHERE discord_id=?", (discord_id,))
     # Remove old link if exists for this user
     db.execute("DELETE FROM discord_links WHERE user_id=?", (user_id,))
     db.execute(

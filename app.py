@@ -151,6 +151,29 @@ REINSTALL_DEBOUNCE_SECONDS = 60
 
 # ── DB ────────────────────────────────────────────────────────────────────────
 
+def _delete_user_link_rows(db, uid):
+    """Remove social-link rows for a user being deleted.
+
+    SQLite foreign_keys is OFF in this app, so the ON DELETE CASCADE on the
+    discord_*/youtube_* tables does not fire. Delete them explicitly, otherwise
+    orphaned discord_links rows block the same Discord ID from being re-linked.
+    """
+    for t in ("discord_links", "discord_membership", "discord_verification_history",
+              "youtube_links", "youtube_subscription_status",
+              "youtube_verification_history", "youtube_subscription_suspensions"):
+        try:
+            exists = db.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (t,)
+            ).fetchone()
+            if not exists:
+                continue
+            cols = [c[1] for c in db.execute(f"PRAGMA table_info({t})").fetchall()]
+            if "user_id" in cols:
+                db.execute(f"DELETE FROM {t} WHERE user_id=?", (uid,))
+        except Exception as e:
+            print(f"[delete_user_links] {t}: {e}")
+
+
 def get_db():
     db = sqlite3.connect(DB)
     db.row_factory = sqlite3.Row
@@ -417,6 +440,7 @@ def delete_account():
                 print(f"[DELETE ACCOUNT] {e}")
         db.execute("DELETE FROM vps WHERE user_id=?",      (current_user.id,))
         db.execute("DELETE FROM feedback WHERE user_id=?",  (current_user.id,))
+        _delete_user_link_rows(db, current_user.id)
         db.execute("DELETE FROM users WHERE id=?",          (current_user.id,))
         db.commit()
         logout_user()
@@ -1177,6 +1201,7 @@ def admin_user_delete(user_id):
         except Exception: pass
     db.execute("DELETE FROM vps WHERE user_id=?", (user_id,))
     db.execute("DELETE FROM feedback WHERE user_id=?", (user_id,))
+    _delete_user_link_rows(db, user_id)
     db.execute("DELETE FROM users WHERE id=?", (user_id,))
     db.commit()
     flash("User deleted")
