@@ -1,0 +1,80 @@
+#!/usr/bin/python3
+"""Forced command used as the sshx "shell".
+
+It performs exactly one action: SSH to the customer's own VPS on its assigned
+port with a per-session key.  It never executes a shell on the panel host and
+never accepts a host, port, user, or key from the browser.
+"""
+
+import json
+import os
+import re
+import sys
+import time
+
+SESSION_ID_RE = re.compile(r"^[a-f0-9]{32}$")
+
+
+def main() -> int:
+    if os.geteuid() == 0:
+        sys.stderr.write("sshx target shell refuses to run as root\n")
+        return 78
+    try:
+        import ctypes
+        ctypes.CDLL("libc.so.6", use_errno=True).prctl(36, 1, 0, 0, 0)
+    except Exception:
+        pass
+
+    sid = os.environ.get("SSHX_SESSION_ID", "")
+    if not SESSION_ID_RE.match(sid):
+        return 2
+    root = os.environ.get("SSHX_SESSION_ROOT", "/var/lib/deup-vps/sshx")
+    spec_path = os.path.join(root, sid, "spec.json")
+    try:
+        with open(spec_path, "r", encoding="utf-8") as f:
+            spec = json.load(f)
+    except Exception:
+        return 3
+    if spec.get("session_id") != sid or int(spec.get("expires_at", 0)) <= int(time.time()):
+        return 4
+
+    ssh = spec.get("ssh_binary", "/usr/bin/ssh")
+    key = spec.get("key_path", "")
+    known = spec.get("known_hosts", "")
+    port = spec.get("ssh_port")
+    host = spec.get("ssh_host", "127.0.0.1")
+    user = spec.get("ssh_user", "root")
+    session_dir = os.path.realpath(os.path.join(root, sid))
+    for path in (key, known):
+        if not path or os.path.realpath(os.path.dirname(path)) != session_dir:
+            return 3
+    if not isinstance(port, int) or not 1 <= port <= 65535:
+        return 3
+    if host != "127.0.0.1" or user != "root":
+        return 3
+
+    argv = [
+        ssh,
+        "-i", key,
+        "-o", "BatchMode=yes",
+        "-o", "StrictHostKeyChecking=yes",
+        "-o", "UserKnownHostsFile=" + known,
+        "-o", "GlobalKnownHostsFile=/dev/null",
+        "-o", "ExitOnForwardFailure=yes",
+        "-o", "ClearAllForwardings=yes",
+        "-o", "ForwardAgent=no",
+        "-o", "ForwardX11=no",
+        "-o", "PermitLocalCommand=no",
+        "-o", "ProxyCommand=none",
+        "-o", "RequestTTY=yes",
+        "-o", "ConnectTimeout=10",
+        "-p", str(port),
+        f"{user}@{host}",
+    ]
+    # execv: no shell, no user input, no inherited host environment.
+    os.execv(ssh, argv)
+    return 127
+
+
+if __name__ == "__main__":
+    sys.exit(main())

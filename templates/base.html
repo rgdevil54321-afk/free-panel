@@ -420,6 +420,7 @@
     <a href="{{ url_for('admin_config') }}" class="{{ 'active' if request.endpoint == 'admin_config' }}">Config</a>
     <a href="{{ url_for('admin_discord') }}" class="{{ 'active' if request.endpoint == 'admin_discord' }}">Discord Admin</a>
     <a href="{{ url_for('admin_youtube') }}" class="{{ 'active' if request.endpoint == 'admin_youtube' }}">YouTube Admin</a>
+    <a href="{{ url_for('admin_sshx') }}" class="{{ 'active' if request.endpoint == 'admin_sshx' }}">SSHX</a>
     {% endif %}
     <a href="{{ url_for('logout') }}" class="nav-sign-out">Sign out</a>
   </div>

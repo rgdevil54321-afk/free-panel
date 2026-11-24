@@ -17,7 +17,7 @@ from werkzeug.middleware.proxy_fix import ProxyFix
 
 from vps import (
     create_vps_container, destroy_vps, suspend_vps, unsuspend_vps,
-    regen_sshx, get_container_stats, build_logs_stream,
+    get_container_stats, build_logs_stream,
     can_create_vps, can_allocate_disk, MAX_VPS_PER_NODE,
     get_host_capacity, start_vps, stop_vps, reinstall_vps,
     sync_status, list_files, read_file_b64, write_file_b64,
@@ -33,6 +33,7 @@ import queue_manager as queue
 import node_mesh
 import ip_intel
 import nat
+import sshx_manager as sshx
 import discord_integration as discord_mod
 import youtube_integration as youtube_mod
 
@@ -258,6 +259,7 @@ def init_db():
     db.commit()
     node_mesh.init_mesh_tables(db)
     nat.init_nat_tables(db)
+    sshx.init_sshx_tables(db)
     discord_mod.init_discord_tables(db)
     import youtube_integration as youtube_mod
     youtube_mod.init_youtube_tables(db)
@@ -291,15 +293,18 @@ def strftime_filter(ts):
 
 @app.template_filter("parse_ssh_command")
 def parse_ssh_command_filter(ssh_command):
-    """Jinja2 filter: returns (ssh_str, sshx_url) tuple from stored ssh_command."""
+    """Parse the stored SSH string.
+
+    Legacy rows may still contain ``|||https://sshx.io/...``.  Those old links
+    are bearer credentials for a permanent root shell and must NEVER be shown
+    again.  SSHX is now issued only as a short-lived, authorized session.
+    """
     if not ssh_command or ssh_command == "__terminal_only__":
         return (None, None)
-    if "|||" in ssh_command:
-        parts = ssh_command.split("|||", 1)
-        return (parts[0].strip(), parts[1].strip())
-    if ssh_command.startswith("ssh "):
-        return (ssh_command, None)
-    return (None, ssh_command)
+    ssh_str = ssh_command.split("|||", 1)[0].strip()
+    if ssh_str.startswith("ssh "):
+        return (ssh_str, None)
+    return (None, None)
 
 @app.before_request
 def detect_node_url():
@@ -778,31 +783,59 @@ def vps_delete(vps_id):
 @app.route("/vps/<int:vps_id>/regen_ssh", methods=["POST"])
 @login_required
 def regen_ssh(vps_id):
-    db  = get_db()
-    vps = db.execute("SELECT * FROM vps WHERE id=?", (vps_id,)).fetchone()
-    if not vps or (vps["user_id"] != current_user.id and not current_user.is_admin):
-        flash("Not found"); return redirect(url_for("dashboard"))
-    if vps["status"] != "running":
-        flash("VPS must be running"); return redirect(url_for("dashboard", vps_id=vps_id))
-    if time.time() - vps["last_regen"] < 30:
-        flash("Wait 30s between regens"); return redirect(url_for("dashboard", vps_id=vps_id))
-    try:
-        new_sshx = regen_sshx(vps["container_id"])
-        # Preserve the SSH port string, update just the sshx part
-        ssh_str, _ = _parse_ssh_command(vps["ssh_command"])
-        if ssh_str and new_sshx:
-            new_cmd = f"{ssh_str}|||{new_sshx}"
-        elif new_sshx:
-            new_cmd = new_sshx
-        else:
-            new_cmd = ssh_str or "__terminal_only__"
-        db.execute("UPDATE vps SET ssh_command=?,last_regen=? WHERE id=?",
-                   (new_cmd, int(time.time()), vps_id))
-        db.commit()
-        flash("Terminal link regenerated")
-    except Exception as e:
-        flash(f"Failed: {e}")
+    """Legacy endpoint retained for bookmarks; it no longer creates links."""
+    flash("Permanent SSHX links are disabled. Use 'Start secure session'.")
     return redirect(url_for("dashboard", vps_id=vps_id))
+
+
+# ── SSHX secure sessions ──────────────────────────────────────────────────────
+
+@app.route("/api/sshx/session", methods=["POST"])
+@login_required
+def sshx_session_create():
+    """Issue a short-lived SSHX session for a VPS the user owns.
+
+    The browser sends only a VPS id.  Host, port, credentials and target
+    selection are resolved entirely on the backend from the database.
+    """
+    data = request.get_json(silent=True) or {}
+    vps_id = data.get("vps_id")
+    if not isinstance(vps_id, int):
+        try:
+            vps_id = int(vps_id)
+        except (TypeError, ValueError):
+            return jsonify({"error": "invalid VPS id"}), 400
+    info, error = sshx.create_session(current_user.id, vps_id, request.remote_addr or "")
+    if error:
+        return jsonify({"error": error}), 403
+    return jsonify(info), 201
+
+
+@app.route("/api/sshx/session/<session_id>", methods=["GET"])
+@login_required
+def sshx_session_status(session_id):
+    row = sshx.get_session(session_id, current_user.id, current_user.is_admin)
+    if not row:
+        return jsonify({"error": "not found"}), 404
+    return jsonify({
+        "id": row["id"],
+        "vps_id": row["vps_id"],
+        "status": row["status"],
+        "created_at": row["created_at"],
+        "expires_at": row["expires_at"],
+    })
+
+
+@app.route("/api/sshx/session/<session_id>/revoke", methods=["POST"])
+@login_required
+def sshx_session_revoke(session_id):
+    ok = sshx.revoke_session(
+        session_id, actor_id=current_user.id, reason="user revoke",
+        user_id=current_user.id, is_admin=current_user.is_admin,
+    )
+    if not ok:
+        return jsonify({"error": "not found or forbidden"}), 404
+    return jsonify({"ok": True})
 
 @app.route("/vps/<int:vps_id>/power/<action>", methods=["POST"])
 @login_required
@@ -1761,10 +1794,69 @@ def admin_youtube():
                            total_linked=total_linked)
 
 
+# ── SSHX administration ───────────────────────────────────────────────────────
+
+@app.route("/admin/sshx", methods=["GET", "POST"])
+@login_required
+def admin_sshx():
+    if not current_user.is_admin:
+        return "Forbidden", 403
+    if request.method == "POST":
+        action = request.form.get("action", "")
+        try:
+            if action == "global_toggle":
+                sshx.set_policy("global_enabled",
+                                "0" if sshx.is_globally_enabled() else "1")
+                _audit_log("sshx_global_toggle", "sshx")
+                flash("SSHX global access toggled")
+            elif action in ("disable_user", "enable_user"):
+                uid = int(request.form.get("user_id", 0))
+                sshx.set_disabled("user", uid, action == "disable_user",
+                                  current_user.id, request.form.get("reason", ""))
+                _audit_log(f"sshx_{action}", str(uid))
+                flash(f"User #{uid} {'disabled' if action == 'disable_user' else 'enabled'}")
+            elif action in ("disable_vps", "enable_vps"):
+                vid = int(request.form.get("vps_id", 0))
+                sshx.set_disabled("vps", vid, action == "disable_vps",
+                                  current_user.id, request.form.get("reason", ""))
+                _audit_log(f"sshx_{action}", str(vid))
+                flash(f"VPS #{vid} {'disabled' if action == 'disable_vps' else 'enabled'}")
+            elif action in ("revoke", "terminate"):
+                sid = request.form.get("session_id", "")
+                if sshx.revoke_session(sid, actor_id=current_user.id,
+                                       reason=f"admin {action}", is_admin=True):
+                    _audit_log(f"sshx_{action}", sid)
+                    flash("Session terminated")
+                else:
+                    flash("Session not found")
+        except (ValueError, TypeError):
+            flash("Invalid request")
+        return redirect(url_for("admin_sshx"))
+
+    db = get_db()
+    users = db.execute("SELECT id,username,is_suspended FROM users ORDER BY username").fetchall()
+    vpses = db.execute("SELECT id,container_id,user_id,status FROM vps ORDER BY id").fetchall()
+    db.close()
+    return render_template(
+        "admin_sshx.html",
+        sessions=sshx.list_sessions(),
+        events=sshx.list_events(),
+        stats=sshx.security_stats(),
+        disabled=sshx.list_disabled(),
+        users=users,
+        vpses=vpses,
+        global_enabled=sshx.is_globally_enabled(),
+    )
+
+
 # ── Boot ──────────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
     init_db()
+    # No SSHX session may survive a panel restart: credentials and policy
+    # checks live in process memory and the database, so start clean.
+    sshx.shutdown_all_sessions()
+    sshx.start_sweeper()
     db = get_db()
     nat.reapply_all_rules(db)
     db.close()

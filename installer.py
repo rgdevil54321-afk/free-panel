@@ -775,6 +775,12 @@ PANEL_HOST=0.0.0.0
 IP_ABUSE_CHECK_ENABLED=0
 # External IP intel: 0=off (privacy), 1=on
 IP_INTEL_ENABLED=0
+# SSHX isolation: sessions are short-lived and bound to an authenticated
+# user + owned VPS.  Never run sshx as root or inside a customer chroot.
+SSHX_GATEWAY_USER=sshx-gw
+SSHX_SESSION_TTL=900
+SSHX_MAX_PER_USER=2
+SSHX_MAX_PER_VPS=1
 """
             env_path = os.path.join(REPO_DIR, ".env")
             with open(env_path, "w") as f:
@@ -1022,6 +1028,194 @@ class VPSBackendBuilder:
             return False
 
 
+# ── SSHX isolation hardening ─────────────────────────────────────────────────
+class SSHXHardening:
+    """Installs the isolated SSHX gateway and removes insecure legacy config."""
+
+    USER = "sshx-gw"
+    HOME = "/var/lib/sshx-gw"
+    OPT = "/opt/sshx"
+    BIN = "/opt/sshx/bin"
+    SESSION_ROOT = os.path.join(CHROOT_ROOT, "sshx")
+
+    def __init__(self, log: Logger, chroot_root: str = CHROOT_ROOT):
+        self.log = log
+        self.chroot_root = chroot_root
+        self.SESSION_ROOT = os.path.join(chroot_root, "sshx")
+
+    def _run(self, cmd, **kwargs):
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=60, **kwargs)
+
+    def apply(self) -> bool:
+        UI.section("SSHX isolation hardening")
+        ok = True
+
+        # Dedicated, unprivileged service account.  Never root, no login shell.
+        if not self._user_exists():
+            r = self._run([
+                "useradd", "--system", "--no-create-home", "--home-dir", self.HOME,
+                "--shell", "/usr/sbin/nologin", self.USER,
+            ])
+            ok &= (r.returncode == 0)
+            UI.ok("Created unprivileged sshx-gw service account" if r.returncode == 0
+                  else "Could not create sshx-gw account")
+        else:
+            UI.info("sshx-gw service account already present")
+
+        for d in (self.OPT, self.BIN, self.HOME, self.SESSION_ROOT,
+                  os.path.join(self.SESSION_ROOT, "sessions")):
+            try:
+                os.makedirs(d, mode=0o755 if d != self.SESSION_ROOT else 0o700, exist_ok=True)
+            except Exception as e:
+                self.log.warn(f"mkdir {d}: {e}")
+        try:
+            import pwd
+            u = pwd.getpwnam(self.USER)
+            for d in (self.HOME, os.path.join(self.SESSION_ROOT, "sessions")):
+                os.chown(d, u.pw_uid, u.pw_gid)
+                os.chmod(d, 0o700)
+        except Exception as e:
+            self.log.warn(f"chown sshx dirs: {e}")
+
+        # Install root-owned gateway code: the service user must not be able to
+        # modify the code it executes.
+        for src_name, dst_name in (("sshx_gateway.py", "sshx_gateway.py"),
+                                   ("sshx-target-shell", "sshx-target-shell")):
+            src = os.path.join(REPO_DIR, "gateway", src_name)
+            dst = os.path.join(self.BIN, dst_name)
+            if not os.path.isfile(src):
+                UI.warn(f"Missing gateway source {src}")
+                ok = False
+                continue
+            shutil.copy2(src, dst)
+            os.chown(dst, 0, 0)
+            os.chmod(dst, 0o755 if dst_name.endswith(".py") else 0o755)
+        UI.ok("Installed isolated SSHX gateway (root-owned, non-writable)")
+
+        # sshx client: downloaded once to a root-owned location on the host.
+        if not self._install_sshx_binary():
+            UI.warn("SSHX binary not installed — sessions will fail until it is available")
+            ok = False
+        else:
+            UI.ok("SSHX client installed at /opt/sshx/sshx")
+
+        # openssh-client is required for the forced SSH hop into the VPS.
+        try:
+            r = self._run(["sh", "-c", "command -v ssh || "
+                           "(apt-get update -qq && apt-get install -y -qq openssh-client)"])
+            if r.returncode != 0:
+                UI.warn("openssh-client could not be verified")
+        except Exception as e:
+            self.log.warn(f"openssh-client check: {e}")
+
+        self._remove_legacy()
+        self._migrate_db()
+        UI.ok("Legacy in-chroot sshx binaries and permanent links removed")
+        return ok
+
+    def _user_exists(self) -> bool:
+        try:
+            import pwd
+            pwd.getpwnam(self.USER)
+            return True
+        except KeyError:
+            return False
+
+    def _install_sshx_binary(self) -> bool:
+        target = os.path.join(self.OPT, "sshx")
+        if os.path.isfile(target) and os.path.getsize(target) > 100000:
+            return True
+        import platform
+        import tarfile
+        import tempfile
+        m = platform.machine().lower()
+        arch = ("aarch64" if m in ("aarch64", "arm64") else
+                "armv7" if m == "armv7l" else "arm" if m == "armv6l" else "x86_64")
+        url = f"https://s3.amazonaws.com/sshx/sshx-{arch}-unknown-linux-musl.tar.gz"
+        try:
+            tmp = os.path.join(tempfile.gettempdir(), f"sshx-{arch}-panel.tar.gz")
+            urllib.request.urlretrieve(url, tmp)
+            with tarfile.open(tmp, "r:gz") as tf:
+                member = next((x for x in tf.getmembers()
+                               if os.path.basename(x.name) == "sshx" and x.isfile()), None)
+                if member is None:
+                    return False
+                f = tf.extractfile(member)
+                data = f.read() if f else b""
+            if len(data) < 100000:
+                return False
+            with open(target, "wb") as out:
+                out.write(data)
+            os.chown(target, 0, 0)
+            os.chmod(target, 0o755)
+            return True
+        except Exception as e:
+            self.log.warn(f"sshx binary download failed: {e}")
+            return False
+
+    def _remove_legacy(self):
+        """Kill and delete every legacy root-run sshx process/binary in VPSes."""
+        try:
+            sys.path.insert(0, REPO_DIR)
+            import vps
+            # Also scrub the shared base rootfs: new VPSes are copied from it,
+            # so a leftover binary there would be reintroduced forever.
+            for base_rel in ("usr/local/bin/sshx", "usr/bin/sshx",
+                             "root/.local/bin/sshx"):
+                p = os.path.join(vps.BASE_ROOT, base_rel)
+                if os.path.lexists(p):
+                    os.remove(p)
+            for name in vps.list_vps_names():
+                try:
+                    for pid in vps._pids_in(name):
+                        try:
+                            cmdline = open(f"/proc/{pid}/cmdline", "rb").read()
+                        except OSError:
+                            cmdline = b""
+                        if b"sshx" in cmdline:
+                            os.kill(pid, signal.SIGKILL)
+                    root = vps._path(name)
+                    for rel in ("usr/local/bin/sshx", "usr/bin/sshx",
+                                "root/.local/bin/sshx", "tmp/sshx.log"):
+                        p = os.path.join(root, rel)
+                        if os.path.lexists(p):
+                            os.remove(p)
+                except Exception as e:
+                    self.log.warn(f"legacy sshx cleanup {name}: {e}")
+        except Exception as e:
+            self.log.warn(f"legacy sshx cleanup: {e}")
+
+    def _migrate_db(self):
+        try:
+            sys.path.insert(0, REPO_DIR)
+            import sshx_manager
+            db = sqlite3.connect(os.path.join(REPO_DIR, "panel.db"))
+            sshx_manager.init_sshx_tables(db)
+            db.close()
+        except Exception as e:
+            self.log.warn(f"sshx db migration: {e}")
+
+    def verify(self) -> tuple[bool, list[str]]:
+        """Post-install isolation checks.  Returns (ok, failures)."""
+        failures = []
+        checks = {
+            "service account": self._user_exists(),
+            "gateway installed": os.path.isfile(os.path.join(self.BIN, "sshx_gateway.py")),
+            "forced shell installed": os.path.isfile(os.path.join(self.BIN, "sshx-target-shell")),
+            "sshx binary installed": os.path.isfile(os.path.join(self.OPT, "sshx")),
+        }
+        for name, result in checks.items():
+            UI.ok(f"SSHX check: {name}") if result else UI.warn(f"SSHX check failed: {name}")
+            if not result:
+                failures.append(name)
+        for f, uid in ((os.path.join(self.BIN, "sshx_gateway.py"), 0),
+                       (os.path.join(self.BIN, "sshx-target-shell"), 0),
+                       (os.path.join(self.OPT, "sshx"), 0)):
+            if os.path.exists(f) and os.stat(f).st_uid != uid:
+                failures.append(f"{os.path.basename(f)} not root-owned")
+        return not failures, failures
+
+
 # ── Installer ───────────────────────────────────────────────────────────────
 class Installer:
     """Main installation orchestrator."""
@@ -1039,6 +1233,7 @@ class Installer:
         self.config_mgr = ConfigManager(self.log, self.env)
         self.service_mgr = ServiceManager(self.log)
         self.vps_builder = VPSBackendBuilder(self.log, self.env)
+        self.sshx_hardening = SSHXHardening(self.log)
         self.env_info = {}
 
     def run(self):
@@ -1131,6 +1326,9 @@ class Installer:
         UI.section("Phase 5: VPS Backend Setup")
         self.vps_builder.setup()
 
+        # SSHX isolation: dedicated account, gateway, legacy cleanup
+        self.sshx_hardening.apply()
+
         # Service creation
         UI.section("Phase 6: Service Creation")
         if not self.config_mgr.write_service(port, CHROOT_ROOT):
@@ -1196,6 +1394,7 @@ class Installer:
         self.config_mgr.write_config(port)
         self.config_mgr.setup_admin(self._ask_admin())
         self.vps_builder.setup()
+        self.sshx_hardening.apply()
 
         # Service
         self.config_mgr.write_service(port, CHROOT_ROOT)
@@ -1223,6 +1422,7 @@ class Installer:
                 UI.warn(f"git pull failed: {e}")
                 self.log.warn(f"git pull failed: {e}")
         self.dep_manager.install_python_deps()
+        self.sshx_hardening.apply()
         self.config_mgr.write_config(self._select_port())
         self.config_mgr.write_service(self._select_port(), CHROOT_ROOT)
         subprocess.run(["systemctl", "restart", SERVICE], capture_output=True, timeout=30)
@@ -1259,6 +1459,10 @@ class Installer:
         if not vps.base_rootfs_ready():
             UI.warn("Base rootfs missing — rebuilding")
             vps.ensure_base_rootfs(verbose=True)
+        self.sshx_hardening.apply()
+        ok, failures = self.sshx_hardening.verify()
+        if not ok:
+            UI.warn(f"SSHX isolation verification failed: {', '.join(failures)}")
 
         # Restart
         subprocess.run(["systemctl", "daemon-reload"], capture_output=True, timeout=30)
@@ -1612,7 +1816,13 @@ class Installer:
         # Check 5: Service is running
         checks.append(("Service active", self.service_mgr.has_systemd()))
 
-        # Check 6: HTTP response
+        # Check 6: SSHX isolation hardening
+        sshx_ok, sshx_failures = self.sshx_hardening.verify()
+        checks.append(("SSHX isolation", sshx_ok))
+        if not sshx_ok:
+            self.log.error(f"SSHX isolation failures: {sshx_failures}")
+
+        # Check 7: HTTP response
         http_ok = False
         try:
             req = urllib.request.Request(f"http://127.0.0.1:{port}/")
@@ -1768,5 +1978,3 @@ Environment (for unattended installs):
 
 if __name__ == "__main__":
     main()
-PYEOF
-PYEOF

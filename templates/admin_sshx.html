@@ -1,0 +1,136 @@
+{% extends "base.html" %}
+{% block title %}SSHX Sessions — DeupGaming{% endblock %}
+{% block head %}
+<style>
+.tbl{width:100%;border-collapse:collapse;font-size:.72rem;}
+.tbl th,.tbl td{padding:.4rem .5rem;border-bottom:1px solid var(--border);text-align:left;vertical-align:top;}
+.tbl th{font-family:var(--mono);font-size:.61rem;color:var(--text-3);text-transform:uppercase;letter-spacing:.06em;}
+.tbl td{font-family:var(--mono);color:var(--text-2);word-break:break-all;}
+.section{margin-bottom:1rem;}
+.grid2{display:grid;grid-template-columns:1fr 1fr;gap:1rem;}
+@media(max-width:900px){.grid2{grid-template-columns:1fr;}}
+</style>
+{% endblock %}
+{% block body %}
+<div class="page">
+  <div class="flex-b" style="margin-bottom:1rem;">
+    <h1 style="font-size:1.05rem;font-weight:600;">SSHX security management</h1>
+    <span class="badge {{ 'badge-green' if global_enabled else 'badge-red' }}">
+      {{ 'globally enabled' if global_enabled else 'globally disabled' }}
+    </span>
+  </div>
+
+  <div class="card section">
+    <div class="card-title">Controls</div>
+    <div style="display:flex;gap:.5rem;flex-wrap:wrap;">
+      <form method="post" action="{{ url_for('admin_sshx') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="action" value="global_toggle">
+        <button class="btn btn-warn btn-sm">{{ 'Disable SSHX globally' if global_enabled else 'Enable SSHX globally' }}</button>
+      </form>
+    </div>
+    <div class="grid2" style="margin-top:.9rem;">
+      <form method="post" action="{{ url_for('admin_sshx') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="action" value="disable_user">
+        <select name="user_id" class="form-input" style="width:auto;">
+          {% for u in users %}<option value="{{ u.id }}">{{ u.username }} (#{{ u.id }})</option>{% endfor %}
+        </select>
+        <input name="reason" class="form-input" style="width:auto;" placeholder="reason">
+        <button class="btn btn-ghost btn-sm">Disable user</button>
+      </form>
+      <form method="post" action="{{ url_for('admin_sshx') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="action" value="enable_user">
+        <select name="user_id" class="form-input" style="width:auto;">
+          {% for u in users %}<option value="{{ u.id }}">{{ u.username }} (#{{ u.id }})</option>{% endfor %}
+        </select>
+        <button class="btn btn-ghost btn-sm">Enable user</button>
+      </form>
+      <form method="post" action="{{ url_for('admin_sshx') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="action" value="disable_vps">
+        <select name="vps_id" class="form-input" style="width:auto;">
+          {% for v in vpses %}<option value="{{ v.id }}">VPS #{{ v.id }} ({{ v.container_id }})</option>{% endfor %}
+        </select>
+        <input name="reason" class="form-input" style="width:auto;" placeholder="reason">
+        <button class="btn btn-ghost btn-sm">Disable VPS</button>
+      </form>
+      <form method="post" action="{{ url_for('admin_sshx') }}">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+        <input type="hidden" name="action" value="enable_vps">
+        <select name="vps_id" class="form-input" style="width:auto;">
+          {% for v in vpses %}<option value="{{ v.id }}">VPS #{{ v.id }} ({{ v.container_id }})</option>{% endfor %}
+        </select>
+        <button class="btn btn-ghost btn-sm">Enable VPS</button>
+      </form>
+    </div>
+    {% if disabled %}
+    <div style="margin-top:.8rem;font-size:.7rem;color:var(--text-3);">
+      Restrictions:
+      {% for d in disabled %}
+        <span class="badge badge-yellow">{{ d.scope }} #{{ d.target_id }}</span>
+      {% endfor %}
+    </div>
+    {% endif %}
+  </div>
+
+  <div class="grid2">
+    <div class="card section">
+      <div class="card-title">Active sessions ({{ stats.active }})</div>
+      <table class="tbl">
+        <thead><tr><th>Session</th><th>Customer</th><th>VPS</th><th>Started</th><th>Expires</th><th>Status</th><th>Actions</th></tr></thead>
+        <tbody>
+        {% for s in sessions %}
+          <tr>
+            <td>{{ s.id[:12] }}…</td>
+            <td>{{ s.username or ('#' ~ s.user_id) }}</td>
+            <td>#{{ s.vps_id }}</td>
+            <td>{{ s.created_at | strftime }}</td>
+            <td>{{ s.expires_at | strftime }}</td>
+            <td>{{ s.status }}</td>
+            <td>
+              <form method="post" action="{{ url_for('admin_sshx') }}" style="display:inline;">
+                <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
+                <input type="hidden" name="action" value="terminate">
+                <input type="hidden" name="session_id" value="{{ s.id }}">
+                <button class="btn btn-ghost btn-sm" style="color:var(--danger);"
+                        onclick="return confirm('Terminate this session?')">Terminate</button>
+              </form>
+            </td>
+          </tr>
+        {% else %}
+          <tr><td colspan="7" style="color:var(--text-3);">no sessions</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+      <div style="font-size:.68rem;color:var(--text-3);margin-top:.5rem;">
+        revoked {{ stats.revoked }} · expired {{ stats.expired }} · failed {{ stats.failed }} · denied {{ stats.denied }}
+        — credentials and session links are never displayed here.
+      </div>
+    </div>
+
+    <div class="card section">
+      <div class="card-title">Security events</div>
+      <table class="tbl">
+        <thead><tr><th>Time</th><th>Action</th><th>Session</th><th>User</th><th>VPS</th><th>Reason</th><th>IP</th></tr></thead>
+        <tbody>
+        {% for e in events %}
+          <tr>
+            <td>{{ e.created_at | strftime }}</td>
+            <td>{{ e.action }}</td>
+            <td>{{ e.session_id[:8] if e.session_id else '—' }}</td>
+            <td>{{ e.username or (e.user_id if e.user_id else '—') }}</td>
+            <td>{{ e.vps_id or '—' }}</td>
+            <td>{{ e.reason or '—' }}</td>
+            <td>{{ e.ip or '—' }}</td>
+          </tr>
+        {% else %}
+          <tr><td colspan="7" style="color:var(--text-3);">no events</td></tr>
+        {% endfor %}
+        </tbody>
+      </table>
+    </div>
+  </div>
+</div>
+{% endblock %}

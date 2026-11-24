@@ -74,4 +74,3 @@ true
                 )
     except Exception as e:
         print(f"[BRAND] metadata block failed: {e}")
-EOF

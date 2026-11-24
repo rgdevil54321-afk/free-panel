@@ -350,16 +350,7 @@
   <!-- Tab bar -->
   <div class="tabs">
     <div class="tab active" id="tab-btn-browser" onclick="switchTab('browser')">&gt;_ Terminal</div>
-    {% set ssh_str, sshx_url = vps.ssh_command | parse_ssh_command %}
-    {% if sshx_url and sshx_url != '__terminal_only__' %}
-    <div class="tab" id="tab-btn-sshx" onclick="switchTab('sshx')">&#8617; sshx</div>
-    {% endif %}
-    <div style="margin-left:auto;display:flex;align-items:center;padding:.2rem 0;">
-      <form method="post" action="{{ url_for('regen_ssh', vps_id=vps.id) }}" style="margin:0;">
-        <input type="hidden" name="csrf_token" value="{{ csrf_token() }}">
-        <button class="btn btn-ghost btn-sm">&#8635; Regen</button>
-      </form>
-    </div>
+    <div class="tab" id="tab-btn-sshx" onclick="switchTab('sshx')">&#8617; SSHX</div>
   </div>
 
   <!-- Browser terminal -->
@@ -377,26 +368,25 @@
     </div>
   </div>
 
-  <!-- sshx tab -->
-  {% set ssh_str2, sshx_url2 = vps.ssh_command | parse_ssh_command %}
-  {% if sshx_url2 and sshx_url2 != '__terminal_only__' %}
+  <!-- SSHX: short-lived, backend-authorized sessions only.
+       The link is fetched over AJAX and is never rendered into the page. -->
   <div id="tab-sshx" style="display:none;padding:.85rem 0;">
-    <p style="font-size:.76rem;color:var(--text-2);margin-bottom:.65rem;">Full-featured browser terminal — colour output, session sharing, mobile.</p>
-    <div style="display:flex;gap:.5rem;align-items:center;flex-wrap:wrap;">
-      <code style="flex:1;padding:.5rem .65rem;font-size:.72rem;word-break:break-all;display:block;background:var(--bg-2);border:1px solid var(--border);border-radius:var(--r);">{{ sshx_url2 }}</code>
-      <a href="{{ sshx_url2 }}" target="_blank" rel="noopener" class="btn btn-primary btn-sm">Open</a>
-      <button class="btn btn-ghost btn-sm" onclick="navigator.clipboard.writeText('{{ sshx_url2 }}')">Copy</button>
+    <div class="alert alert-info" style="font-size:.75rem;margin-bottom:.7rem;">
+      SSHX opens a temporary terminal that is bound to your account and this VPS.
+      It expires automatically and can be revoked at any time.
     </div>
-  </div>
-  {% endif %}
-
-  {% if not sshx_url2 or sshx_url2 == '__terminal_only__' %}
-  <div style="padding:.6rem 0;">
-    <div class="alert alert-info" style="font-size:.75rem;">
-      sshx not established — browser terminal above has full access. Click <strong>Regen</strong> to retry.
+    <div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:center;margin-bottom:.6rem;">
+      <button class="btn btn-primary btn-sm" id="sshxStart">Start secure session</button>
+      <span id="sshxStatus" style="font-size:.72rem;color:var(--text-3);font-family:var(--mono);">no active session</span>
     </div>
+    <div id="sshxLinkBox" style="display:none;gap:.5rem;align-items:center;flex-wrap:wrap;">
+      <code id="sshxLink" style="flex:1;padding:.5rem .65rem;font-size:.72rem;word-break:break-all;display:block;background:var(--bg-2);border:1px solid var(--border);border-radius:var(--r);"></code>
+      <a id="sshxOpen" href="#" target="_blank" rel="noopener noreferrer" class="btn btn-primary btn-sm">Open</a>
+      <button class="btn btn-ghost btn-sm" id="sshxCopy">Copy</button>
+      <button class="btn btn-ghost btn-sm" id="sshxRevoke" style="color:var(--danger);">Revoke</button>
+    </div>
+    <div id="sshxError" class="alert alert-error" style="display:none;font-size:.72rem;margin-top:.6rem;"></div>
   </div>
-  {% endif %}
   {% endif %}
 </div>
 
@@ -436,6 +426,65 @@ function setStar(v){
   document.getElementById('starInput').value=v;
   document.querySelectorAll('.star-btn').forEach(s=>s.classList.toggle('lit',parseInt(s.dataset.v)<=v));
 }
+{% if vps and vps.status == 'running' %}
+(function(){
+  const start=document.getElementById('sshxStart');
+  if(!start) return;
+  const status=document.getElementById('sshxStatus'),
+        box=document.getElementById('sshxLinkBox'),
+        link=document.getElementById('sshxLink'),
+        open=document.getElementById('sshxOpen'),
+        err=document.getElementById('sshxError');
+  let sid=null, timer=null;
+  const csrf='{{ csrf_token() }}';
+  const endpoint='{{ url_for("sshx_session_create") }}';
+  function showError(msg){err.textContent=msg||'';err.style.display=msg?'':'none';}
+  function clear(){
+    sid=null; if(timer){clearInterval(timer);timer=null;}
+    box.style.display='none'; link.textContent=''; open.href='#';
+    status.textContent='no active session';
+  }
+  async function create(){
+    showError(''); start.disabled=true; status.textContent='starting…';
+    try{
+      const r=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},
+        body:JSON.stringify({vps_id:{{ vps.id }}})});
+      const d=await r.json();
+      if(!r.ok){clear();showError(d.error||'could not start session');return;}
+      sid=d.id; link.textContent=d.url; open.href=d.url;
+      box.style.display='flex';
+      watch();
+    }catch(e){clear();showError('network error');}
+    finally{start.disabled=false;}
+  }
+  async function watch(){
+    if(timer) clearInterval(timer);
+    timer=setInterval(async()=>{
+      if(!sid) return;
+      try{
+        const r=await fetch('/api/sshx/session/'+encodeURIComponent(sid));
+        if(r.status===404){clear();return;}
+        const d=await r.json();
+        if(d.status!=='starting'&&d.status!=='active'){
+          clear();showError('session ended ('+d.status+')');return;
+        }
+        const left=Math.max(0,d.expires_at-Math.floor(Date.now()/1000));
+        status.textContent='expires in '+Math.floor(left/60)+'m '+(left%60)+'s';
+      }catch(e){}
+    },5000);
+  }
+  start.addEventListener('click',create);
+  document.getElementById('sshxCopy').addEventListener('click',()=>{
+    if(link.textContent) navigator.clipboard.writeText(link.textContent);
+  });
+  document.getElementById('sshxRevoke').addEventListener('click',async()=>{
+    if(!sid) return;
+    await fetch('/api/sshx/session/'+encodeURIComponent(sid)+'/revoke',
+      {method:'POST',headers:{'X-CSRF-Token':csrf}});
+    clear();showError('session revoked');
+  });
+})();
+{% endif %}
 {% if vps and vps.status == 'running' %}
 (function(){
   const out=document.getElementById('terminal-output'),inp=document.getElementById('terminal-cmd');

@@ -69,9 +69,6 @@ try:
 except Exception:
     MIN_FREE_DISK_GB = 5
 
-SSHX_LINK_RE   = re.compile(r"https://sshx\.io/s/[A-Za-z0-9]+#[A-Za-z0-9_-]+")
-ANSI_ESCAPE_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
-
 CHROOT_ENV = {
     "PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
     "HOME": "/root",
@@ -123,6 +120,27 @@ def _load_meta(name: str) -> dict | None:
             return json.load(f)
     except Exception:
         return None
+
+
+def list_vps_names() -> list[str]:
+    """Names of VPSes that have metadata (used by the installer repair path)."""
+    _ensure_dirs()
+    try:
+        return sorted(f[:-5] for f in os.listdir(META_DIR)
+                      if f.endswith(".json") and _VPS_NAME_RE.match(f[:-5]))
+    except Exception:
+        return []
+
+
+def meta_exists(name: str) -> bool:
+    """Public, read-only check used by SSHX authorization."""
+    return os.path.isfile(_meta_path(name))
+
+
+def load_meta(name: str) -> dict | None:
+    """Public read-only metadata accessor (returns a copy)."""
+    meta = _load_meta(name)
+    return dict(meta) if meta else None
 
 
 def _save_meta(name: str, data: dict):
@@ -318,26 +336,27 @@ def _prepare_runtime(name: str) -> dict:
     _mkdir_devices(root)
     _mkdir_devices(root)
 
-    pts_ok = _mount_bind("/dev/pts", os.path.join(root, "dev", "pts"))
-    if not pts_ok:
-        pts_ok = _mount_fs(
-            "devpts", "devpts", os.path.join(root, "dev", "pts"),
-            "newinstance,ptmxmode=0666,mode=0620",
-        )
+    # NEVER bind-mount the host's /dev/pts or /dev/shm into a VPS.  Host PTYs
+    # are a well-known chroot escape / session-hijacking path.  Each VPS gets
+    # its own devpts instance and its own tmpfs.
+    pts_ok = _mount_fs(
+        "devpts", "devpts", os.path.join(root, "dev", "pts"),
+        "newinstance,ptmxmode=0666,mode=0620",
+    )
     if pts_ok:
-        # make sure /dev/ptmx resolves to the mounted devpts instance
         ptmx = os.path.join(root, "dev", "ptmx")
         try:
-            if os.path.isfile(ptmx) or os.path.exists(ptmx):
+            if os.path.lexists(ptmx):
                 os.remove(ptmx)
             os.symlink("pts/ptmx", ptmx)
         except Exception:
             pass
 
-    _mount_bind("/dev/shm", os.path.join(root, "dev", "shm"))
+    shm_ok = _mount_fs("tmpfs", "tmpfs", os.path.join(root, "dev", "shm"),
+                       "nosuid,nodev,noexec,mode=1777,size=64m")
     proc_ok = _mount_fs("proc", "proc", os.path.join(root, "proc"))
 
-    return {"proc": proc_ok, "devpts": pts_ok}
+    return {"proc": proc_ok, "devpts": pts_ok, "shm": shm_ok}
 
 
 def _teardown_runtime(name: str):
@@ -975,6 +994,78 @@ def base_rootfs_ready_path(root: str) -> bool:
     return False
 
 
+# ── per-VPS SSH credential helpers (used by the SSHX gateway) ───────────────
+
+_VPS_NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+
+
+def _require_vps(name: str) -> str:
+    """Validate a VPS name and return its canonical root path."""
+    if not isinstance(name, str) or not _VPS_NAME_RE.match(name):
+        raise ValueError("Invalid VPS identifier")
+    root = os.path.realpath(_path(name))
+    base = os.path.realpath(VPS_ROOT) + os.sep
+    if not root.startswith(base) or root == os.path.realpath(VPS_ROOT):
+        raise ValueError("Invalid VPS path")
+    if not os.path.isdir(root) or not os.path.isfile(_meta_path(name)):
+        raise RuntimeError("VPS not found")
+    return root
+
+
+def get_host_public_key(name: str, keytype: str = "ed25519") -> str | None:
+    """Read the customer's own VPS host public key for SSH pinning."""
+    if keytype not in ("ed25519", "rsa", "ecdsa"):
+        return None
+    try:
+        root = _require_vps(name)
+        with open(os.path.join(root, "etc", "ssh",
+                               f"ssh_host_{keytype}_key.pub"), "r",
+                  encoding="utf-8") as f:
+            return f.read().strip()
+    except Exception:
+        return None
+
+
+def add_authorized_key(name: str, entry: str, marker: str) -> None:
+    """Add a restricted key to the customer's VPS.  Caller must own the VPS."""
+    root = _require_vps(name)
+    if not marker or "\n" in marker or "\r" in marker:
+        raise ValueError("Invalid marker")
+    if "\n" in entry or "\r" in entry:
+        raise ValueError("Invalid key entry")
+    sshdir = os.path.join(root, "root", ".ssh")
+    path = os.path.join(sshdir, "authorized_keys")
+    os.makedirs(sshdir, mode=0o700, exist_ok=True)
+    os.chmod(sshdir, 0o700)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        os.write(fd, (entry + "\n").encode("utf-8"))
+    finally:
+        os.close(fd)
+    os.chmod(path, 0o600)
+
+
+def remove_authorized_key_marker(name: str, marker: str) -> None:
+    """Remove every authorized_keys line carrying the given session marker."""
+    try:
+        root = _require_vps(name)
+        path = os.path.join(root, "root", ".ssh", "authorized_keys")
+        if not os.path.isfile(path):
+            return
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+        kept = [line for line in lines if marker not in line]
+        if len(kept) == len(lines):
+            return
+        tmp = path + ".sshx.tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.writelines(kept)
+        os.chmod(tmp, 0o600)
+        os.replace(tmp, path)
+    except Exception:
+        pass
+
+
 # ── per-VPS setup ───────────────────────────────────────────────────────────
 
 def _write_sshd_config(name: str, port: int = 22):
@@ -1272,7 +1363,11 @@ def create_vps_container(
     image: str = IMAGE_ALIAS,
     kvm_enabled: bool = False,
 ):
-    """Creates a chroot VPS and returns (container_id, sshx_url|'__terminal_only__')."""
+    """Create a chroot VPS.  Returns ``(container_id, None)``.
+
+    SSHX links are no longer created at provision time.  They are issued as
+    short-lived, authorized sessions by ``sshx_manager`` on demand.
+    """
     cpu  = cpu_limit    if cpu_limit    is not None else get_free_vps_cpu()
     ram  = ram_limit_mb if ram_limit_mb is not None else get_free_vps_ram()
     disk = disk_limit_gb if disk_limit_gb is not None else get_free_vps_disk()
@@ -1300,38 +1395,14 @@ def create_vps_container(
     except Exception as e:
         print(f"[BRAND] {e}")
 
-    # Give sshx a PTY inside the jail before it starts: sshx allocates
-    # /dev/pts for the shell it spawns.  Best-effort — if mount is blocked
-    # on the host, sshx still runs but with no interactive terminal.
+    # Prepare a private PTY/proc runtime for the jailed sshd.  SSHX itself is
+    # never started inside the jail (that was the host-access vulnerability).
     try:
         _prepare_runtime(cid)
     except Exception as e:
-        print(f"[vps] runtime mount for sshx failed on {cid}: {e}")
+        print(f"[vps] runtime mount failed on {cid}: {e}")
 
-    # sshx browser terminal (optional; panel terminal is the fallback)
-    sshx_ready = False
-    for attempt in range(3):
-        if _install_sshx(inst):
-            sshx_ready = True
-            break
-        print(f"[sshx] install attempt {attempt+1}/3 failed, retrying in 5s...")
-        time.sleep(5)
-
-    session_url = None
-    if sshx_ready:
-        for attempt in range(5):
-            session_url = _start_sshx_session(inst)
-            if session_url:
-                break
-            print(f"[sshx] session attempt {attempt+1}/5 failed, retrying in 5s...")
-            time.sleep(5)
-
-    if not session_url:
-        print(f"[sshx] WARNING: sshx not established for {cid} — "
-              "browser terminal will be used as fallback.")
-        return cid, "__terminal_only__"
-
-    return cid, session_url
+    return cid, None
 
 
 def attach_ssh_port(container_id: str, port: int) -> dict:
@@ -1483,143 +1554,10 @@ def sync_status(container_id: str, db_status: str) -> str:
 
 
 # ── sshx ────────────────────────────────────────────────────────────────────
-
-def _install_sshx(inst) -> bool:
-    """Install the statically-linked sshx binary directly into the chroot.
-
-    We deliberately avoid 'curl | sh' and apt here: the chroot's apt is often
-    broken (Perl/base-library mismatches) and curl is absent. The sshx Linux
-    binary is statically linked (musl), so downloading it on the host and
-    copying it into the rootfs always works.
-    """
-    import platform
-    import tarfile
-    import tempfile
-    import urllib.request
-
-    try:
-        root = _path(inst.name)
-        target = os.path.join(root, "usr", "local", "bin", "sshx")
-        if os.path.isfile(target) and os.access(target, os.X_OK):
-            return True
-        for p in (os.path.join(root, "root", ".local", "bin", "sshx"),
-                  os.path.join(root, "usr", "bin", "sshx")):
-            if os.path.isfile(p) and os.access(p, os.X_OK):
-                os.makedirs(os.path.dirname(target), exist_ok=True)
-                try:
-                    os.symlink(p, target)
-                except FileExistsError:
-                    pass
-                return True
-
-        machine = platform.machine().lower()
-        if machine in ("aarch64", "arm64"):
-            arch = "aarch64"
-        elif machine == "armv7l":
-            arch = "armv7"
-        elif machine == "armv6l":
-            arch = "arm"
-        else:
-            arch = "x86_64"
-        url = f"https://s3.amazonaws.com/sshx/sshx-{arch}-unknown-linux-musl.tar.gz"
-        cache = os.path.join(tempfile.gettempdir(), f"sshx-{arch}.tar.gz")
-        if not os.path.isfile(cache) or os.path.getsize(cache) < 100000:
-            print(f"[sshx] downloading {url}")
-            urllib.request.urlretrieve(url, cache)
-
-        with tarfile.open(cache, "r:gz") as tf:
-            member = next((m for m in tf.getmembers()
-                           if os.path.basename(m.name) == "sshx" and m.isfile()), None)
-            if member is None:
-                print("[sshx] archive has no 'sshx' binary")
-                return False
-            f = tf.extractfile(member)
-            data = f.read() if f else b""
-        if not data:
-            return False
-        os.makedirs(os.path.dirname(target), exist_ok=True)
-        with open(target, "wb") as out:
-            out.write(data)
-        os.chmod(target, 0o755)
-
-        # CA bundle so the static binary can verify sshx.io's TLS certificate.
-        certsrc = "/etc/ssl/certs/ca-certificates.crt"
-        if os.path.isfile(certsrc):
-            certdir = os.path.join(root, "etc", "ssl", "certs")
-            os.makedirs(certdir, exist_ok=True)
-            try:
-                shutil.copyfile(certsrc, os.path.join(certdir, "ca-certificates.crt"))
-            except Exception:
-                pass
-        print("[sshx] installed static binary into chroot")
-        return True
-    except Exception as e:
-        print(f"[sshx install] {e}")
-        return False
-
-
-def _ensure_symlinked(inst, found_path: str, env: dict):
-    if found_path == "/usr/local/bin/sshx":
-        return
-    try:
-        inst.execute(["bash", "-c", f"ln -sf '{found_path}' /usr/local/bin/sshx"],
-                     environment=env)
-    except Exception:
-        pass
-
-
-def _apt_install_with_retry(inst, package: str, env: dict, attempts: int = 5) -> bool:
-    wait_lock = (
-        "for i in $(seq 1 30); do "
-        "  fuser /var/lib/dpkg/lock-frontend >/dev/null 2>&1 || break; sleep 1; done"
-    )
-    for _ in range(attempts):
-        inst.execute(["bash", "-c", wait_lock], environment=env)
-        result = inst.execute(
-            ["bash", "-c", f"apt-get update -qq && apt-get install -y -qq {package}"],
-            environment=env,
-        )
-        if result.exit_code == 0:
-            return True
-        time.sleep(4)
-    return False
-
-
-def _start_sshx_session(inst) -> str | None:
-    try:
-        inst.execute(["bash", "-c", "pkill sshx 2>/dev/null; rm -f /tmp/sshx.log; true"])
-        inst.execute(["bash", "-c",
-                      "setsid sh -c 'NO_COLOR=1 TERM=dumb nohup sshx > /tmp/sshx.log 2>&1 < /dev/null' >/dev/null 2>&1 &"])
-        for tick in range(30):
-            time.sleep(1)
-            result = inst.execute(["bash", "-c", "cat /tmp/sshx.log 2>/dev/null || true"])
-            raw_log = result.stdout or ""
-            clean_log = ANSI_ESCAPE_RE.sub("", raw_log)
-            match = SSHX_LINK_RE.search(clean_log)
-            if match:
-                print(f"[sshx] session link found after {tick+1}s")
-                return match.group(0)
-            if (tick + 1) % 5 == 0:
-                print(f"[sshx] waiting for link... {tick+1}s elapsed")
-        print("[sshx] timed out after 30s — no link found in log")
-        return None
-    except Exception as e:
-        print(f"[sshx session] {e}")
-        return None
-
-
-def regen_sshx(container_id: str) -> str | None:
-    inst = _ChrootVPS(container_id)
-    if not os.path.isdir(_path(container_id)):
-        raise RuntimeError("VPS not found")
-    env = {"HOME": "/root", "DEBIAN_FRONTEND": "noninteractive"}
-    find_cmd = "command -v sshx || ls /root/.local/bin/sshx /usr/local/bin/sshx 2>/dev/null | head -1"
-    check = inst.execute(["bash", "-c", find_cmd], environment=env)
-    if not (check.stdout or "").strip():
-        print("[regen_sshx] sshx not found — attempting install first")
-        _install_sshx(inst)
-    return _start_sshx_session(inst)
-
+# SSHX is deliberately NOT started here any more.  The legacy code ran the
+# sshx binary as root inside the chroot and handed out a permanent link,
+# which exposed the main VPS.  See sshx_manager.py / sshx_gateway.py for the
+# isolated, per-session gateway implementation.
 
 # ── stats ───────────────────────────────────────────────────────────────────
 
