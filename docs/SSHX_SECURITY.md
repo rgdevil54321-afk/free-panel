@@ -95,6 +95,62 @@ Key properties:
 * **Hardened chroot runtime.** Host `/dev/pts` and `/dev/shm` bind mounts were
   replaced with a private `devpts newinstance` and a size-limited tmpfs.
 
+## Fail-closed containment (added after the first fix)
+
+The authorization gate is now gated by **two** policy rows in `sshx_policy`:
+
+| Policy | Default on fresh/upgraded install | Meaning |
+|---|---|---|
+| `sshx_contained` | `1` | Public SSHX access is blocked. No session can be created. |
+| `global_enabled` | `0` | Even after containment is lifted, an explicit admin enable is required. |
+
+`INSERT OR IGNORE` is used so an existing operator's explicit choice is never
+overwritten by a later migration. `set_contained(True)` and
+`set_policy("global_enabled", "0")` immediately revoke every live session.
+The customer dashboard reports a maintenance state (`503`) instead of a
+generic error. Only an administrator who visits `/admin/sshx`, sees the
+server-side prerequisite check, and ticks the isolation-confirmation box can
+lift containment; failures are recorded in `admin_audit` and `sshx_events`.
+
+Additional hardening in this pass:
+
+* **Live authorization revalidation.** Every session is re-checked against the
+  same gate during startup and by the sweeper. If the customer is suspended,
+  the VPS is suspended/deleted, or a policy disables the target, the session is
+  revoked immediately instead of surviving until TTL expiry.
+* **Idle cleanup.** Owner status polling updates `last_seen`. A session whose
+  heartbeat stops is expired after `SSHX_IDLE_TIMEOUT` (default 600s), in
+  addition to the 15-minute hard TTL.
+* **Duplicate protection.** A partial unique index on
+  `sshx_sessions(vps_id) WHERE status IN ('starting','active')` backs up the
+  in-process caps; historical duplicates are migrated to `failed` additively.
+* **Revocation hooks.** User/VPS suspend and delete (including bulk admin
+  actions) call `revoke_all_sessions()` with the proper scope.
+* **Gateway input trust.** The gateway and forced shell reject any spec whose
+  `container_id`, `ssh_host`, `ssh_user`, port, key paths, or `ssh_binary`
+  differs from the server-generated values. Executables must be root-owned and
+  not group/world writable; session keys/known_hosts must be 0600.
+* **Proxy trust is opt-in.** `ProxyFix` is only installed when
+  `TRUST_PROXY=1`, preventing spoofed `X-Forwarded-For` from poisoning audit
+  logs or IP checks.
+* **One-time links are never restored.** Reconnecting issues a fresh link; the
+  dashboard restores only session status.
+
+## Restored Management Suite CLI
+
+Commit `9785c5f` had deleted the original 15-item `install.sh` menu when the
+installer was rewritten in Python. That functionality is restored in
+`management_suite.py` and installed as `/usr/local/bin/panel` by every
+install/reinstall/update/repair path. The menu delegates all backend work to
+the single `Installer` implementation, so there is only one code path for
+install, update, repair, backup, restore, port changes, Cloudflare, etc.
+
+`ConfigManager.write_config()` now **merges** with an existing `.env` instead of
+overwriting it: operator values (custom port, tokens, feature flags,
+`TRUST_PROXY`) survive upgrades and repairs, while missing security defaults
+are added. Service verification uses `systemctl is-active --quiet` rather than
+merely checking that systemd exists.
+
 ## Files changed
 
 | File | Change |
@@ -107,15 +163,17 @@ Key properties:
 | `templates/dashboard.html` | Removed stored-link display/regen form; added AJAX-driven secure session UI with expiry polling and revoke. |
 | `templates/admin_sshx.html` (new) | Session list, stats, security events, global/user/VPS controls; no credentials. |
 | `templates/base.html` | Admin SSHX navigation entry. |
-| `installer.py` | `SSHXHardening`: creates `sshx-gw`, installs root-owned gateway code, installs sshx client + openssh-client, kills/removes legacy in-chroot binaries, strips legacy DB links, verifies ownership, wired into install/reinstall/update/repair/verify, new `.env` knobs. |
-| `tests/test_sshx_isolation.py` (new) | Tests A–J. |
-| `tests/test_sshx_routes.py` (new) | HTTP-level ownership, parameter-ignoring, isolation and admin-no-credential tests. |
+| `installer.py` | `SSHXHardening`: creates `sshx-gw`, installs root-owned gateway code, installs sshx client + openssh-client, kills/removes legacy in-chroot binaries, strips legacy DB links, verifies ownership, wired into install/reinstall/update/repair/verify, new `.env` knobs. Now also preserves existing `.env`, installs/restores the `panel` CLI, and checks real service state. |
+| `management_suite.py` (new) | Restored 15-action Management Suite menu delegating to `Installer` modes. |
+| `tests/test_sshx_isolation.py` (new) | Tests A–Q (isolation, containment, idle/live revocation, duplicates, audit). |
+| `tests/test_sshx_routes.py` (new) | HTTP-level ownership, parameter-ignoring, isolation, containment and admin controls. |
+| `tests/test_management_suite.py` (new) | Restored menu mapping, `.env` preservation, CLI installation and additive-migration checks. |
 
 ## Verification performed
 
 ```
 $ python3 -m unittest discover -s tests -v
-Ran 14 tests ... OK
+Ran 32 tests ... OK
 ```
 
 * A — normal access: link issued, correct DB port/VPS, never persisted/logged.
@@ -130,6 +188,20 @@ Ran 14 tests ... OK
 * I — static checks: gateway/wrapper refuse root, no `shell=True`, no
   `chroot` invocation in the SSHX manager, legacy functions gone.
 * J — two users get distinct keys/ports and cannot cross-read sessions.
+* K — a fresh/upgraded DB is contained by default and denies authorization.
+* L — containment blocks creation and revokes already-live sessions.
+* M — live sessions are revalidated and revoked when ownership/state changes.
+* N — idle sessions are expired even when the hard TTL has not elapsed.
+* O — duplicate sessions are rejected by both the app lock and the partial
+  unique index.
+* P — gateway/target-shell source rejects tampered specs and untrusted binaries.
+* Q — audit events record the lifecycle and never contain links or key paths.
+* HTTP — containment returns 503 with `maintenance: true`; admin validation
+  requires confirmation and passing prerequisites; scoped revoke forms work;
+  the dashboard template never renders a link or credential.
+* Installer — existing `.env` settings survive a rewrite; fresh installs get
+  the secure defaults; the `panel` wrapper is created executable; every install
+  path reinstalls the CLI.
 
 No destructive test was run against a real customer VPS: all tests use temp
 directories, a temp SQLite DB, and patched process launchers.

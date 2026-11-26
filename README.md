@@ -57,7 +57,16 @@ auto-generate one), and the installer will:
 At the end it prints the panel URL and the login, and saves it to
 `/root/.deup-panel-credentials`.
 
-After installation, `panel` opens the same menu from anywhere.
+After installation, `panel` opens the same menu from anywhere. `install.sh` is
+a thin Python-bootstrap wrapper; the real engine is `installer.py`, and the
+restored 15-action menu lives in `management_suite.py`. Upgrades and repairs
+**preserve an existing `.env`** — hand-set ports, tokens and feature flags are
+never overwritten.
+
+> **SSHX is contained by default.** After install/upgrade, browser terminals
+> are disabled until an administrator visits `/admin/sshx`, checks the
+> server-side prerequisites, and confirms that isolation was validated. See
+> [docs/SSHX_SECURITY.md](docs/SSHX_SECURITY.md).
 
 ## How a VPS is built (chroot backend)
 
@@ -69,7 +78,9 @@ After installation, `panel` opens the same menu from anywhere.
 ```
 
 - `create` copies the base rootfs, sets a random root password, regenerates
-  SSH host keys, applies branding, and installs `sshx`.
+  SSH host keys, and applies branding. The legacy in-chroot `sshx` install was
+  removed: sessions are now authorized per user/VPS and terminate in the
+  customer's own VPS via an unprivileged gateway.
 - `nat.py` allocates a public port (`10000–10999`); the jailed `sshd` binds it
   directly on the host, so no iptables DNAT is used.
 - Extra ports (`11000–19999`) are recorded for display; users can bind them
@@ -99,9 +110,11 @@ PANEL_USER=admin PANEL_PASS='change-me' VPS_CPU=4 VPS_RAM=4 VPS_DISK=80 \
   bash install.sh --install
 ```
 
-Other flags: `--reinstall`, `--update`, `--start`, `--stop`, `--restart`,
-`--status`, `--logs`, `--backup`, `--restore [file]`, `--reset-admin`,
-`--port N`, `--uninstall [--purge]`, `--cloudflare`, `--diagnose`, `--help`.
+Other flags: `--reinstall`, `--update`, `--repair`, `--start`, `--stop`,
+`--restart`, `--status`, `--logs`, `--backup`, `--restore [file]`,
+`--reset-admin`, `--port N`, `--uninstall [--purge]`, `--cloudflare`,
+`--diagnose`, `--help`. The same flags work through `panel` (for example
+`panel --diagnose` or `panel --repair`).
 
 Additional commands:
 - `--repair` — Detect and repair broken components
@@ -120,6 +133,14 @@ Additional commands:
 | `CLOUDFLARE_TOKEN` | unset | tunnel token for unattended `--cloudflare` setup |
 | `IP_ABUSE_CHECK_ENABLED` | unset (off) | block multiple VPSes from one IP (breaks behind NAT/shared hosting) |
 | `IP_INTEL_ENABLED` | unset | enables external IP lookups |
+| `TRUST_PROXY` | `0` | only trust `X-Forwarded-*` behind a trusted reverse proxy |
+| `SSHX_GATEWAY_USER` | `sshx-gw` | unprivileged account that runs the SSHX gateway |
+| `SSHX_SESSION_TTL` | `900` | hard lifetime of one SSHX session (seconds) |
+| `SSHX_IDLE_TIMEOUT` | `600` | expiry after the owner stops polling (seconds) |
+| `SSHX_MAX_PER_USER` / `SSHX_MAX_PER_VPS` | `2` / `1` | concurrent session caps |
+
+SSHX containment/global state is stored in `sshx_policy` in `panel.db`, not in
+`.env`, and is intentionally not changed by an upgrade.
 
 ## Requirements
 
