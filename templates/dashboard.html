@@ -372,19 +372,40 @@
        The link is fetched over AJAX and is never rendered into the page. -->
   <div id="tab-sshx" style="display:none;padding:.85rem 0;">
     <div class="alert alert-info" style="font-size:.75rem;margin-bottom:.7rem;">
-      SSHX opens a temporary terminal that is bound to your account and this VPS.
-      It expires automatically and can be revoked at any time.
+      This terminal is issued by the panel for <strong>your VPS only</strong>.
+      The destination is verified server-side from your account's VPS record —
+      never from this page. Sessions expire automatically and can be revoked at any time.
     </div>
+    <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(180px,1fr));gap:.5rem;margin-bottom:.7rem;">
+      <div class="info-item">
+        <span class="info-label">Target VPS</span>
+        <code class="info-val" id="sshxTarget">{{ vps.container_id }}</code>
+      </div>
+      <div class="info-item">
+        <span class="info-label">Assigned SSH port</span>
+        <span class="info-val">{{ nat_info.ssh_port if nat_info else '—' }}</span>
+      </div>
+    </div>
+    {% if sshx_contained or not sshx_enabled %}
+    <div class="alert alert-error" style="font-size:.72rem;margin-bottom:.7rem;">
+      SSHX is currently disabled by an administrator (maintenance/containment).
+      No terminal session can be opened.
+    </div>
+    {% endif %}
     <div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:center;margin-bottom:.6rem;">
       <button class="btn btn-primary btn-sm" id="sshxStart">Start secure session</button>
-      <span id="sshxStatus" style="font-size:.72rem;color:var(--text-3);font-family:var(--mono);">no active session</span>
+      <button class="btn btn-ghost btn-sm" id="sshxReconnect" disabled>Reconnect</button>
+      <button class="btn btn-ghost btn-sm" id="sshxDisconnect" disabled>Disconnect</button>
+      <button class="btn btn-ghost btn-sm" id="sshxClear">Clear output</button>
+      <span class="badge badge-grey" id="sshxState">Disconnected</span>
     </div>
     <div id="sshxLinkBox" style="display:none;gap:.5rem;align-items:center;flex-wrap:wrap;">
       <code id="sshxLink" style="flex:1;padding:.5rem .65rem;font-size:.72rem;word-break:break-all;display:block;background:var(--bg-2);border:1px solid var(--border);border-radius:var(--r);"></code>
-      <a id="sshxOpen" href="#" target="_blank" rel="noopener noreferrer" class="btn btn-primary btn-sm">Open</a>
-      <button class="btn btn-ghost btn-sm" id="sshxCopy">Copy</button>
-      <button class="btn btn-ghost btn-sm" id="sshxRevoke" style="color:var(--danger);">Revoke</button>
+      <a id="sshxOpen" href="#" target="_blank" rel="noopener noreferrer" class="btn btn-primary btn-sm">Open terminal</a>
+      <button class="btn btn-ghost btn-sm" id="sshxCopy">Copy link</button>
     </div>
+    <div id="sshxDetails" style="font-size:.7rem;color:var(--text-3);font-family:var(--mono);margin-top:.55rem;"></div>
+    <div id="sshxLog" style="font-size:.68rem;color:var(--text-3);font-family:var(--mono);margin-top:.4rem;max-height:90px;overflow:auto;"></div>
     <div id="sshxError" class="alert alert-error" style="display:none;font-size:.72rem;margin-top:.6rem;"></div>
   </div>
   {% endif %}
@@ -430,59 +451,114 @@ function setStar(v){
 (function(){
   const start=document.getElementById('sshxStart');
   if(!start) return;
-  const status=document.getElementById('sshxStatus'),
+  const reconnect=document.getElementById('sshxReconnect'),
+        disconnect=document.getElementById('sshxDisconnect'),
+        clearLog=document.getElementById('sshxClear'),
+        state=document.getElementById('sshxState'),
         box=document.getElementById('sshxLinkBox'),
         link=document.getElementById('sshxLink'),
         open=document.getElementById('sshxOpen'),
+        details=document.getElementById('sshxDetails'),
+        logBox=document.getElementById('sshxLog'),
         err=document.getElementById('sshxError');
-  let sid=null, timer=null;
+  let sid=null, timer=null, hadSession=false;
   const csrf='{{ csrf_token() }}';
   const endpoint='{{ url_for("sshx_session_create") }}';
+
   function showError(msg){err.textContent=msg||'';err.style.display=msg?'':'none';}
-  function clear(){
-    sid=null; if(timer){clearInterval(timer);timer=null;}
+  function setState(text,cls){state.textContent=text;state.className='badge '+cls;}
+  function log(msg){
+    const d=new Date();
+    logBox.textContent+=d.toTimeString().slice(0,8)+'  '+msg+'\n';
+    logBox.scrollTop=logBox.scrollHeight;
+  }
+  function stopTimer(){if(timer){clearInterval(timer);timer=null;}}
+  function disconnected(msg){
+    stopTimer(); sid=null;
     box.style.display='none'; link.textContent=''; open.href='#';
-    status.textContent='no active session';
+    reconnect.disabled=!hadSession; disconnect.disabled=true;
+    setState('Disconnected','badge-grey'); details.textContent='';
+    if(msg) log(msg);
   }
   async function create(){
-    showError(''); start.disabled=true; status.textContent='starting…';
+    showError(''); start.disabled=true; reconnect.disabled=true;
+    setState('Connecting…','badge-yellow'); log('requesting session from panel…');
     try{
+      // Only the VPS id is sent. Destination, credentials and port are resolved
+      // server-side from the authenticated customer's VPS record.
       const r=await fetch(endpoint,{method:'POST',headers:{'Content-Type':'application/json','X-CSRF-Token':csrf},
         body:JSON.stringify({vps_id:{{ vps.id }}})});
       const d=await r.json();
-      if(!r.ok){clear();showError(d.error||'could not start session');return;}
-      sid=d.id; link.textContent=d.url; open.href=d.url;
+      if(!r.ok){
+        disconnected('session denied: '+(d.error||'unknown error'));
+        showError(d.maintenance
+          ? 'SSHX is under maintenance. Contact an administrator.'
+          : (d.error||'Could not start session. Check that your VPS is running.'));
+        return;
+      }
+      hadSession=true; sid=d.id; link.textContent=d.url; open.href=d.url;
       box.style.display='flex';
+      setState('Session active','badge-green');
+      log('gateway session authorized for VPS {{ vps.container_id }}');
       watch();
-    }catch(e){clear();showError('network error');}
-    finally{start.disabled=false;}
+    }catch(e){
+      disconnected('network error'); showError('Network error — check your connection and retry.');
+    }finally{start.disabled=false;}
   }
-  async function watch(){
-    if(timer) clearInterval(timer);
+  function watch(){
+    stopTimer();
     timer=setInterval(async()=>{
       if(!sid) return;
       try{
         const r=await fetch('/api/sshx/session/'+encodeURIComponent(sid));
-        if(r.status===404){clear();return;}
+        if(r.status===404){disconnected('session not found');showError('Session no longer exists.');return;}
         const d=await r.json();
         if(d.status!=='starting'&&d.status!=='active'){
-          clear();showError('session ended ('+d.status+')');return;
+          disconnected('session ended ('+d.status+')');
+          showError(d.status==='expired'?'Session expired. Reconnect to continue.'
+            :'Session was revoked or is no longer authorized.');
+          return;
+        }
+        if(!d.authorized){
+          disconnected('authorization revoked by panel');
+          showError('Your access to this VPS changed. The session was terminated.');
+          return;
         }
         const left=Math.max(0,d.expires_at-Math.floor(Date.now()/1000));
-        status.textContent='expires in '+Math.floor(left/60)+'m '+(left%60)+'s';
-      }catch(e){}
-    },5000);
+        details.textContent='expires in '+Math.floor(left/60)+'m '+(left%60)+'s'
+          +' · session '+sid.slice(0,12)+'… · terminal opened in a new tab';
+        if(d.maintenance){disconnected('containment enabled');showError('SSHX was disabled by an administrator.');}
+        reconnect.disabled=false; disconnect.disabled=false;
+      }catch(e){log('status poll failed; retrying');}
+    },3000);
+  }
+  async function revoke(msg){
+    if(!sid) return;
+    const id=sid;
+    try{
+      await fetch('/api/sshx/session/'+encodeURIComponent(id)+'/revoke',
+        {method:'POST',headers:{'X-CSRF-Token':csrf}});
+    }catch(e){}
+    disconnected(msg);
   }
   start.addEventListener('click',create);
+  reconnect.addEventListener('click',create);
+  reconnect.disabled=true;
+  disconnect.addEventListener('click',()=>revoke('session revoked by you'));
+  disconnect.disabled=true;
+  clearLog.addEventListener('click',()=>{logBox.textContent='';});
   document.getElementById('sshxCopy').addEventListener('click',()=>{
     if(link.textContent) navigator.clipboard.writeText(link.textContent);
   });
-  document.getElementById('sshxRevoke').addEventListener('click',async()=>{
-    if(!sid) return;
-    await fetch('/api/sshx/session/'+encodeURIComponent(sid)+'/revoke',
-      {method:'POST',headers:{'X-CSRF-Token':csrf}});
-    clear();showError('session revoked');
-  });
+  {% if sshx_active_session %}
+  // The link is a one-time bearer credential and is deliberately NOT stored.
+  // Restore only the status; the customer can reconnect to get a fresh link.
+  hadSession=true; sid='{{ sshx_active_session.id }}';
+  setState('Session active','badge-green');
+  log('an authorized session already exists; its one-time link is not stored');
+  showError('You have an active session. Use Reconnect to issue a fresh terminal link.');
+  reconnect.disabled=false; disconnect.disabled=false; watch();
+  {% endif %}
 })();
 {% endif %}
 {% if vps and vps.status == 'running' %}

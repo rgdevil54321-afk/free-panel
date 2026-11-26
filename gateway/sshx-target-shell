@@ -48,9 +48,16 @@ def main() -> int:
     for path in (key, known):
         if not path or os.path.realpath(os.path.dirname(path)) != session_dir:
             return 3
+        if not os.path.isfile(path):
+            return 3
+        if os.stat(path).st_mode & 0o077:
+            return 3
     if not isinstance(port, int) or not 1 <= port <= 65535:
         return 3
     if host != "127.0.0.1" or user != "root":
+        return 3
+    # Never let a modified spec point at a non-system ssh binary.
+    if not os.path.isfile(ssh) or os.stat(ssh).st_uid != 0 or (os.stat(ssh).st_mode & 0o022):
         return 3
 
     argv = [

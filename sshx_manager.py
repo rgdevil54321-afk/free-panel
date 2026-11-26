@@ -69,8 +69,11 @@ SESSION_TTL_SECONDS = int(os.environ.get("SSHX_SESSION_TTL", "900"))       # 15 
 LINK_WAIT_SECONDS = float(os.environ.get("SSHX_LINK_WAIT", "12"))
 MAX_ACTIVE_PER_USER = int(os.environ.get("SSHX_MAX_PER_USER", "2"))
 MAX_ACTIVE_PER_VPS = int(os.environ.get("SSHX_MAX_PER_VPS", "1"))
+IDLE_TIMEOUT_SECONDS = int(os.environ.get("SSHX_IDLE_TIMEOUT", "600"))     # 10 min
 CREATE_RATE_WINDOW = 60
 CREATE_RATE_MAX = 3
+CONTAINED_POLICY = "sshx_contained"
+GLOBAL_POLICY = "global_enabled"
 
 SSHD_HOST = "127.0.0.1"          # fixed: never taken from the request
 SSHD_USER = "root"               # root *inside the customer's own VPS*
@@ -92,7 +95,12 @@ def _connect() -> sqlite3.Connection:
 
 
 def init_sshx_tables(db: sqlite3.Connection | None = None) -> None:
-    """Create SSHX tables and migrate legacy rows.  Safe to call repeatedly."""
+    """Create SSHX tables and migrate legacy rows.  Safe to call repeatedly.
+
+    Migrations are additive only: no customer/VPS row is ever dropped.  The
+    containment flag defaults to ``1`` so an upgraded installation cannot serve
+    sessions until an administrator explicitly validates isolation.
+    """
     own = db is None
     db = db or _connect()
     try:
@@ -115,6 +123,8 @@ def init_sshx_tables(db: sqlite3.Connection | None = None) -> None:
                 ON sshx_sessions(user_id, status);
             CREATE INDEX IF NOT EXISTS idx_sshx_sessions_vps
                 ON sshx_sessions(vps_id, status);
+            CREATE INDEX IF NOT EXISTS idx_sshx_sessions_state
+                ON sshx_sessions(status, expires_at, last_seen);
             CREATE TABLE IF NOT EXISTS sshx_events (
                 id         INTEGER PRIMARY KEY AUTOINCREMENT,
                 session_id TEXT,
@@ -142,7 +152,10 @@ def init_sshx_tables(db: sqlite3.Connection | None = None) -> None:
             );
             """
         )
-        for key, value in (("global_enabled", "1"), ("default_ttl", str(SESSION_TTL_SECONDS))):
+        # Fail closed.  INSERT OR IGNORE preserves an administrator's explicit
+        # choice on subsequent runs; new/upgraded installs start contained.
+        for key, value in ((CONTAINED_POLICY, "1"), (GLOBAL_POLICY, "0"),
+                           ("default_ttl", str(SESSION_TTL_SECONDS))):
             db.execute("INSERT OR IGNORE INTO sshx_policy(key,value) VALUES(?,?)", (key, value))
         # Legacy rows stored a permanent sshx URL inside ssh_command.  Remove it
         # so it can never be rendered, copied, or reused.
@@ -153,6 +166,25 @@ def init_sshx_tables(db: sqlite3.Connection | None = None) -> None:
                 db.execute("UPDATE vps SET ssh_command=? WHERE id=?", (cleaned, row["id"]))
             elif SSHX_URL_RE.search(raw):
                 db.execute("UPDATE vps SET ssh_command=NULL WHERE id=?", (row["id"],))
+        # Resolve historical duplicates before adding the partial unique index.
+        # Keep the newest session per VPS; mark older ones failed (no data loss
+        # to customers or VPS records).
+        seen: set[int] = set()
+        for row in db.execute(
+            "SELECT id, vps_id FROM sshx_sessions"
+            " WHERE status IN ('starting','active') ORDER BY created_at DESC, id DESC"
+        ).fetchall():
+            if row["vps_id"] in seen:
+                db.execute(
+                    "UPDATE sshx_sessions SET status='failed', closed_at=? WHERE id=?",
+                    (int(time.time()), row["id"]),
+                )
+            else:
+                seen.add(row["vps_id"])
+        db.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_sshx_active_vps"
+            " ON sshx_sessions(vps_id) WHERE status IN ('starting','active')"
+        )
         db.commit()
     finally:
         if own:
@@ -183,33 +215,76 @@ def log_event(action: str, *, session_id: str | None = None,
 
 # ── Policy helpers ───────────────────────────────────────────────────────────
 
-def _policy(key: str, default: str) -> str:
+def _policy(key: str, default: str, db: sqlite3.Connection | None = None) -> str:
+    own = db is None
+    db = db or _connect()
     try:
-        db = _connect()
         row = db.execute("SELECT value FROM sshx_policy WHERE key=?", (key,)).fetchone()
-        db.close()
         return row["value"] if row else default
     except Exception:
         return default
+    finally:
+        if own:
+            db.close()
 
 
 def set_policy(key: str, value: str) -> None:
-    allowed = {"global_enabled", "default_ttl"}
+    allowed = {GLOBAL_POLICY, CONTAINED_POLICY, "default_ttl"}
     if key not in allowed:
         raise ValueError("unknown policy")
-    if key == "global_enabled" and value not in ("0", "1"):
+    if key in (GLOBAL_POLICY, CONTAINED_POLICY) and value not in ("0", "1"):
         raise ValueError("invalid value")
     if key == "default_ttl" and (not value.isdigit() or not 60 <= int(value) <= 86400):
         raise ValueError("invalid value")
     db = _connect()
-    db.execute("INSERT INTO sshx_policy(key,value) VALUES(?,?) "
-               "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
-    db.commit()
-    db.close()
+    try:
+        db.execute("INSERT INTO sshx_policy(key,value) VALUES(?,?) "
+                   "ON CONFLICT(key) DO UPDATE SET value=excluded.value", (key, value))
+        db.commit()
+    finally:
+        db.close()
+    if key == GLOBAL_POLICY and value == "0":
+        revoke_all_sessions(actor_id=None, reason="disabled globally")
 
 
 def is_globally_enabled() -> bool:
-    return _policy("global_enabled", "1") == "1"
+    return _policy(GLOBAL_POLICY, "0") == "1"
+
+
+def is_contained() -> bool:
+    """True while public SSHX access is blocked for containment/maintenance."""
+    return _policy(CONTAINED_POLICY, "1") == "1"
+
+
+def set_contained(contained: bool, actor_id: int | None = None,
+                  reason: str = "") -> None:
+    """Enable/disable the fail-closed containment gate (admin action only)."""
+    set_policy(CONTAINED_POLICY, "1" if contained else "0")
+    log_event("containment_enabled" if contained else "containment_lifted",
+              actor_id=actor_id, reason=reason)
+    if contained:
+        revoke_all_sessions(actor_id=actor_id, reason="containment enabled")
+
+
+def verify_environment() -> tuple[bool, list[str]]:
+    """Server-side prerequisites an admin must confirm before lifting containment."""
+    failures: list[str] = []
+    if os.geteuid() == 0:
+        try:
+            pwd.getpwnam(GATEWAY_USER)
+        except KeyError:
+            failures.append("sshx-gw service account missing")
+    for label, path in (("gateway", GATEWAY_SCRIPT), ("target shell", TARGET_SHELL),
+                        ("sshx client", SSHX_BINARY), ("ssh client", SSH_BINARY)):
+        if not os.path.isfile(path) or not os.access(path, os.X_OK):
+            failures.append(f"{label} missing or not executable: {path}")
+        else:
+            st = os.stat(path)
+            if st.st_uid != 0:
+                failures.append(f"{label} is not root-owned: {path}")
+            if st.st_mode & 0o022:
+                failures.append(f"{label} is group/world writable: {path}")
+    return not failures, failures
 
 
 def set_disabled(scope: str, target_id: int, disabled: bool,
@@ -217,17 +292,19 @@ def set_disabled(scope: str, target_id: int, disabled: bool,
     if scope not in ("user", "vps") or not isinstance(target_id, int) or target_id <= 0:
         raise ValueError("invalid target")
     db = _connect()
-    if disabled:
-        db.execute(
-            "INSERT INTO sshx_disabled(scope,target_id,reason,created_by,created_at)"
-            " VALUES(?,?,?,?,?) ON CONFLICT(scope,target_id) DO UPDATE SET"
-            " reason=excluded.reason,created_by=excluded.created_by,created_at=excluded.created_at",
-            (scope, target_id, reason[:200], actor_id, int(time.time())),
-        )
-    else:
-        db.execute("DELETE FROM sshx_disabled WHERE scope=? AND target_id=?", (scope, target_id))
-    db.commit()
-    db.close()
+    try:
+        if disabled:
+            db.execute(
+                "INSERT INTO sshx_disabled(scope,target_id,reason,created_by,created_at)"
+                " VALUES(?,?,?,?,?) ON CONFLICT(scope,target_id) DO UPDATE SET"
+                " reason=excluded.reason,created_by=excluded.created_by,created_at=excluded.created_at",
+                (scope, target_id, reason[:200], actor_id, int(time.time())),
+            )
+        else:
+            db.execute("DELETE FROM sshx_disabled WHERE scope=? AND target_id=?", (scope, target_id))
+        db.commit()
+    finally:
+        db.close()
     log_event("admin_disable" if disabled else "admin_enable",
               user_id=target_id if scope == "user" else None,
               vps_id=target_id if scope == "vps" else None,
@@ -235,22 +312,31 @@ def set_disabled(scope: str, target_id: int, disabled: bool,
     if disabled:
         # Kill live sessions covered by the new restriction immediately.
         col = "user_id" if scope == "user" else "vps_id"
-        for row in _connect().execute(
-            f"SELECT id FROM sshx_sessions WHERE status IN ('active','starting') AND {col}=?",
-            (target_id,),
-        ):
-            revoke_session(row["id"], actor_id=actor_id, reason=f"{scope} disabled")
-
-
-def is_disabled(scope: str, target_id: int) -> bool:
-    try:
         db = _connect()
+        try:
+            ids = [r["id"] for r in db.execute(
+                f"SELECT id FROM sshx_sessions WHERE status IN ('active','starting')"
+                f" AND {col}=?", (target_id,),
+            ).fetchall()]
+        finally:
+            db.close()
+        for sid in ids:
+            revoke_session(sid, actor_id=actor_id, trusted=True, reason=f"{scope} disabled")
+
+
+def is_disabled(scope: str, target_id: int,
+                db: sqlite3.Connection | None = None) -> bool:
+    own = db is None
+    db = db or _connect()
+    try:
         row = db.execute("SELECT 1 FROM sshx_disabled WHERE scope=? AND target_id=?",
                          (scope, target_id)).fetchone()
-        db.close()
         return bool(row)
     except Exception:
         return False
+    finally:
+        if own:
+            db.close()
 
 
 def list_disabled() -> list[dict]:
@@ -265,24 +351,31 @@ def list_disabled() -> list[dict]:
 # ── Authorization ────────────────────────────────────────────────────────────
 
 def authorize_session(user_id: int, vps_id: int, db: sqlite3.Connection | None = None,
-                      ip: str = "") -> tuple[bool, str, sqlite3.Row | None]:
+                      ip: str = "", audit: bool = True) -> tuple[bool, str, sqlite3.Row | None]:
     """The single gate for every SSHX session operation.
 
-    Checks, in order: global toggle, user suspension / per-user toggle,
-    VPS existence, ownership, status, suspension, per-VPS toggle, NAT
+    Checks, in order: containment, global toggle, user suspension / per-user
+    toggle, VPS existence, ownership, status, suspension, per-VPS toggle, NAT
     configuration and container-id validity.  No browser supplied connection
-    parameter is ever read here.
+    parameter is ever read here.  ``audit=False`` is used when revalidating
+    live sessions so periodic sweeps do not flood the audit log.
     """
     own = db is None
     db = db or _connect()
-    deny = lambda reason: (log_event("auth_deny", user_id=user_id, vps_id=vps_id,
-                                     reason=reason, ip=ip, db=db), False, reason, None)[1:]
+    def deny(reason: str):
+        if audit:
+            log_event("auth_deny", user_id=user_id, vps_id=vps_id,
+                      reason=reason, ip=ip, db=db)
+        return False, reason, None
+
     try:
         if not isinstance(user_id, int) or user_id <= 0 or not isinstance(vps_id, int) or vps_id <= 0:
             return deny("invalid identifiers")
-        if not is_globally_enabled():
+        if _policy(CONTAINED_POLICY, "1", db) == "1":
+            return deny("SSHX is disabled for maintenance; ask an administrator")
+        if _policy(GLOBAL_POLICY, "0", db) != "1":
             return deny("sshx disabled globally")
-        if is_disabled("user", user_id):
+        if is_disabled("user", user_id, db=db):
             return deny("sshx disabled for user")
         user = db.execute("SELECT is_suspended FROM users WHERE id=?", (user_id,)).fetchone()
         if not user:
@@ -296,7 +389,7 @@ def authorize_session(user_id: int, vps_id: int, db: sqlite3.Connection | None =
             return deny("vps not owned by user")
         if vps["status"] != "running":
             return deny(f"vps not running ({vps['status']})")
-        if is_disabled("vps", vps_id):
+        if is_disabled("vps", vps_id, db=db):
             return deny("sshx disabled for vps")
         cid = vps["container_id"] or ""
         if not CONTAINER_ID_RE.match(cid) or cid in ("pending", "pending-overflow", "overflow-failed"):
@@ -560,12 +653,19 @@ def create_session(user_id: int, vps_id: int, ip: str = "") -> tuple[dict | None
             port = int(db.execute("SELECT ssh_port FROM nat_rules WHERE vps_id=?",
                                   (vps_id,)).fetchone()[0])
 
-            db.execute(
-                "INSERT INTO sshx_sessions(id,user_id,vps_id,container_id,status,created_at,"
-                "expires_at,remote_ip) VALUES(?,?,?,?,'starting',?,?,?)",
-                (session_id, user_id, vps_id, cid, now, now + ttl, ip),
-            )
-            db.commit()
+            try:
+                db.execute(
+                    "INSERT INTO sshx_sessions(id,user_id,vps_id,container_id,status,"
+                    "created_at,expires_at,last_seen,remote_ip)"
+                    " VALUES(?,?,?,?,'starting',?,?,?,?)",
+                    (session_id, user_id, vps_id, cid, now, now + ttl, now, ip),
+                )
+                # Partial unique index is the cross-process backstop; the lock
+                # above covers requests handled by this panel process.
+                db.commit()
+            except sqlite3.IntegrityError:
+                db.rollback()
+                return None, "VPS already has an active session"
 
         try:
             directory = _session_dir(session_id)
@@ -615,8 +715,20 @@ def create_session(user_id: int, vps_id: int, ip: str = "") -> tuple[dict | None
 
         url = _read_link(session_id)
         if not url:
-            revoke_session(session_id, actor_id=user_id, reason="gateway timeout")
+            revoke_session(session_id, actor_id=user_id, trusted=True, reason="gateway timeout")
             return None, "session gateway did not start"
+
+        if not session_still_active(session_id):
+            # Authorization changed while the gateway was starting.
+            revoke_session(session_id, actor_id=user_id, trusted=True,
+                           reason="authorization changed during startup")
+            return None, "session authorization was revoked"
+
+        db.execute(
+            "UPDATE sshx_sessions SET status='active',last_seen=? WHERE id=?",
+            (int(time.time()), session_id),
+        )
+        db.commit()
 
         # Only the owner can learn the URL.  It is deliberately not persisted.
         return {
@@ -645,6 +757,87 @@ def get_session(session_id: str, user_id: int | None = None,
         return dict(row)
     finally:
         db.close()
+
+
+def touch_session(session_id: str, user_id: int | None = None,
+                  is_admin: bool = False) -> bool:
+    """Record that an authorized caller is still using this session.
+
+    This is what makes idle cleanup meaningful: the customer's dashboard polls
+    status only while the terminal page is open.  A closed browser stops the
+    heartbeat and the sweeper revokes the session after IDLE_TIMEOUT_SECONDS.
+    """
+    row = get_session(session_id, user_id, is_admin)
+    if not row or row["status"] not in ("starting", "active"):
+        return False
+    db = _connect()
+    try:
+        db.execute(
+            "UPDATE sshx_sessions SET last_seen=? WHERE id=? AND status IN ('starting','active')",
+            (int(time.time()), session_id),
+        )
+        db.commit()
+        return True
+    finally:
+        db.close()
+
+
+def session_still_active(session_id: str) -> bool:
+    """Re-run the authorization gate against a live session (no audit spam)."""
+    db = _connect()
+    try:
+        row = db.execute("SELECT user_id,vps_id,status,expires_at FROM sshx_sessions"
+                         " WHERE id=?", (session_id,)).fetchone()
+        if not row or row["status"] not in ("starting", "active") or row["expires_at"] <= int(time.time()):
+            return False
+        ok, _, _ = authorize_session(row["user_id"], row["vps_id"], db=db, audit=False)
+        return ok
+    finally:
+        db.close()
+
+
+def enforce_live_authorizations() -> int:
+    """Revoke sessions whose customer/VPS authorization was lost mid-session."""
+    db = _connect()
+    try:
+        rows = db.execute(
+            "SELECT id,user_id,vps_id,container_id,pid,status FROM sshx_sessions"
+            " WHERE status IN ('starting','active')"
+        ).fetchall()
+        revoked = []
+        for row in rows:
+            ok, reason, _ = authorize_session(row["user_id"], row["vps_id"],
+                                              db=db, audit=False)
+            if not ok:
+                revoked.append((row["id"], row["user_id"], row["vps_id"],
+                                row["container_id"], row["pid"], reason))
+    finally:
+        db.close()
+    for sid, uid, vid, cid, pid, reason in revoked:
+        log_event("authz_revoked", session_id=sid, user_id=uid, vps_id=vid,
+                  reason=reason[:200])
+        revoke_session(sid, trusted=True, reason=reason)
+    return len(revoked)
+
+
+def revoke_all_sessions(actor_id: int | None = None, reason: str = "",
+                        *, user_id: int | None = None,
+                        vps_id: int | None = None) -> int:
+    """Revoke every active session, optionally scoped to one user or VPS."""
+    clauses, args = ["status IN ('starting','active')"], []
+    if user_id is not None:
+        clauses.append("user_id=?"); args.append(user_id)
+    if vps_id is not None:
+        clauses.append("vps_id=?"); args.append(vps_id)
+    sql = "SELECT id FROM sshx_sessions WHERE " + " AND ".join(clauses)
+    db = _connect()
+    try:
+        ids = [r["id"] for r in db.execute(sql, tuple(args)).fetchall()]
+    finally:
+        db.close()
+    for sid in ids:
+        revoke_session(sid, actor_id=actor_id, trusted=True, reason=reason)
+    return len(ids)
 
 
 def list_sessions(user_id: int | None = None, limit: int = 200) -> list[dict]:
@@ -743,42 +936,55 @@ def _cleanup_session(session_id: str, cid: str | None, pid: int | None) -> None:
 
 
 def expire_stale_sessions() -> int:
-    """Expire sessions whose TTL elapsed, and reap dead processes."""
+    """Expire TTL/idle sessions, reap dead processes, recheck authorization."""
     now = int(time.time())
+    idle_cutoff = now - max(60, IDLE_TIMEOUT_SECONDS)
     db = _connect()
-    expired: list[tuple[str, str, int | None]] = []
+    expired: list[tuple[str, str, int | None, str]] = []
     dead: list[str] = []
     try:
         for row in db.execute(
             "SELECT id,container_id,pid FROM sshx_sessions"
             " WHERE status IN ('starting','active') AND expires_at<=?", (now,)
         ):
-            expired.append((row["id"], row["container_id"], row["pid"]))
+            expired.append((row["id"], row["container_id"], row["pid"], "ttl"))
+        for row in db.execute(
+            "SELECT id,container_id,pid FROM sshx_sessions"
+            " WHERE status IN ('starting','active') AND expires_at>?"
+            " AND COALESCE(last_seen,created_at)<?", (now, idle_cutoff)
+        ):
+            expired.append((row["id"], row["container_id"], row["pid"], "idle timeout"))
+        already_closed = {item[0] for item in expired}
         for row in db.execute(
             "SELECT id,pid FROM sshx_sessions WHERE status IN ('starting','active')"
             " AND pid IS NOT NULL AND expires_at>?", (now,)
         ):
+            # A session already scheduled for TTL/idle expiry must not be
+            # overwritten as 'failed' just because its gateway also exited.
+            if row["id"] in already_closed:
+                continue
             try:
                 os.kill(row["pid"], 0)
             except OSError:
                 dead.append(row["id"])
-        db.execute(
-            "UPDATE sshx_sessions SET status='expired',closed_at=? "
-            "WHERE status IN ('starting','active') AND expires_at<=?", (now, now)
-        )
+        for sid, _, _, reason in expired:
+            db.execute(
+                "UPDATE sshx_sessions SET status='expired',closed_at=? WHERE id=?",
+                (now, sid),
+            )
+            log_event("session_expired", session_id=sid, reason=reason, db=db)
         for sid in dead:
             db.execute(
                 "UPDATE sshx_sessions SET status='failed',closed_at=? WHERE id=?",
                 (now, sid),
             )
+            log_event("session_gone", session_id=sid, reason="process exited", db=db)
         db.commit()
     finally:
         db.close()
-    for sid, cid, pid in expired:
-        log_event("session_expired", session_id=sid, reason="ttl")
+    for sid, cid, pid, reason in expired:
         _cleanup_session(sid, cid, pid)
     for sid in dead:
-        log_event("session_gone", session_id=sid, reason="process exited")
         _cleanup_session(sid, "", None)
     return len(expired)
 
@@ -787,9 +993,31 @@ def _sweeper_loop() -> None:
     while True:
         try:
             expire_stale_sessions()
+            enforce_live_authorizations()
+            shutdown_orphaned_processes()
         except Exception as exc:
             print(f"[sshx] sweeper error: {type(exc).__name__}")
         time.sleep(20)
+
+
+def shutdown_orphaned_processes() -> None:
+    """Defense in depth: no gateway may run without an authorized DB session."""
+    db = _connect()
+    try:
+        live = {r["id"] for r in db.execute(
+            "SELECT id FROM sshx_sessions WHERE status IN ('starting','active')"
+        ).fetchall()}
+    finally:
+        db.close()
+    try:
+        names = os.listdir(SESSION_ROOT)
+    except OSError:
+        return
+    for name in names:
+        if not SESSION_ID_RE.match(name) or name in live:
+            continue
+        # A directory without an active session is leftover state: scrub it.
+        _cleanup_session(name, "", None)
 
 
 def start_sweeper() -> None:
@@ -832,6 +1060,8 @@ def security_stats() -> dict:
             "failed": count("SELECT COUNT(*) FROM sshx_sessions WHERE status='failed'"),
             "denied": count("SELECT COUNT(*) FROM sshx_events WHERE action IN ('auth_deny','revoke_denied')"),
             "global_enabled": is_globally_enabled(),
+            "contained": is_contained(),
+            "idle_timeout": IDLE_TIMEOUT_SECONDS,
         }
     finally:
         db.close()

@@ -101,6 +101,12 @@ class SSHXRouteTests(unittest.TestCase):
         """)
         db.commit()
         sshx.init_sshx_tables(db)
+        # Tests run with containment lifted (post-validation state).
+        db.execute("INSERT OR REPLACE INTO sshx_policy(key,value) VALUES(?,?)",
+                   (sshx.CONTAINED_POLICY, "0"))
+        db.execute("INSERT OR REPLACE INTO sshx_policy(key,value) VALUES(?,?)",
+                   (sshx.GLOBAL_POLICY, "1"))
+        db.commit()
         db.close()
 
     def _create_vps(self, cid, vps_id, user_id, port):
@@ -192,8 +198,12 @@ class SSHXRouteTests(unittest.TestCase):
         self.assertEqual(r2.status_code, 404)
 
         self.login(1)
-        self.assertEqual(self.client.get(f"/api/sshx/session/{sid}").status_code, 200)
-        self.assertEqual(sshx.get_session(sid, 1)["status"], "starting")
+        r = self.client.get(f"/api/sshx/session/{sid}")
+        self.assertEqual(r.status_code, 200)
+        self.assertEqual(sshx.get_session(sid, 1)["status"], "active")
+        # Owner polling is a heartbeat that keeps idle cleanup at bay.
+        self.assertTrue(r.get_json()["authorized"])
+        self.assertIn("last_seen", r.get_json())
 
     # ── Admin management: no credentials exposed ─────────────────────────────
     def test_admin_page_has_no_credentials(self):
@@ -215,6 +225,91 @@ class SSHXRouteTests(unittest.TestCase):
         })
         self.assertEqual(r.status_code, 302)
         self.assertEqual(sshx.get_session(sid, 3, is_admin=True)["status"], "revoked")
+
+    # ── Containment: fail closed over HTTP ────────────────────────────────────
+    def test_route_containment_returns_maintenance(self):
+        self.login(1)
+        sshx.set_contained(True, actor_id=3, reason="test")
+        r = self.post_create(1)
+        self.assertEqual(r.status_code, 503)
+        data = r.get_json()
+        self.assertTrue(data["maintenance"])
+        self.assertFalse(data["can_retry"])
+        self.assertIn("maintenance", data["error"])
+        self.assertEqual(sshx.list_sessions(), [])
+        # Status endpoint still reports containment to an owner.
+        sshx.set_policy(sshx.CONTAINED_POLICY, "0")
+        created = self.post_create(1)
+        self.assertEqual(created.status_code, 201)
+        sid = created.get_json()["id"]
+
+    # ── Admin: validation, containment and scoped revocation ─────────────────
+    def test_admin_containment_and_revocation_controls(self):
+        self.login(1)
+        created = self.post_create(1)
+        sid = created.get_json()["id"]
+
+        # fresh installs start contained; set the flag without revoking the
+        # session we just created so we can exercise the admin flow.
+        sshx.set_policy(sshx.CONTAINED_POLICY, "1")
+
+        self.login(3)
+        # 1. Confirmation is mandatory.
+        r = self.client.post("/admin/sshx", data={
+            "csrf_token": "test-csrf-token", "action": "validate_and_enable",
+        })
+        self.assertEqual(r.status_code, 302)
+        self.assertTrue(sshx.is_contained())
+
+        # 2. Prerequisite failures keep containment enabled.
+        with mock.patch.object(sshx, "verify_environment",
+                               return_value=(False, ["gateway missing"])):
+            r = self.client.post("/admin/sshx", data={
+                "csrf_token": "test-csrf-token", "action": "validate_and_enable",
+                "confirm": "1",
+            })
+        self.assertEqual(r.status_code, 302)
+        self.assertTrue(sshx.is_contained())
+
+        # 3. Confirmed + validated lifts containment and enables access.
+        with mock.patch.object(sshx, "verify_environment", return_value=(True, [])):
+            r = self.client.post("/admin/sshx", data={
+                "csrf_token": "test-csrf-token", "action": "validate_and_enable",
+                "confirm": "1",
+            })
+        self.assertEqual(r.status_code, 302)
+        self.assertFalse(sshx.is_contained())
+        self.assertTrue(sshx.is_globally_enabled())
+        self.assertEqual(sshx.get_session(sid, 1)["status"], "active")
+
+        # 4. Scoped revocation works without exposing other users' links.
+        r = self.client.post("/admin/sshx", data={
+            "csrf_token": "test-csrf-token", "action": "revoke_user", "user_id": "1",
+        })
+        self.assertEqual(r.status_code, 302)
+        self.assertEqual(sshx.get_session(sid, 3, is_admin=True)["status"], "revoked")
+
+        # 5. Global containment revokes everything again.
+        self.login(1)
+        other = self.post_create(1)
+        self.login(3)
+        self.client.post("/admin/sshx", data={
+            "csrf_token": "test-csrf-token", "action": "contain",
+        })
+        self.assertTrue(sshx.is_contained())
+        self.assertEqual(sshx.get_session(other.get_json()["id"], 3, True)["status"], "revoked")
+
+    # ── Dashboard template never renders a one-time link or credentials ─────
+    def test_dashboard_template_has_no_link_or_credentials(self):
+        body = (REPO / "templates" / "dashboard.html").read_text()
+        self.assertIn("sshx_contained", body)
+        self.assertIn("Target VPS", body)
+        self.assertIn("Assigned SSH port", body)
+        self.assertNotIn(LINK, body)
+        self.assertNotIn("id_ed25519", body)
+        self.assertNotIn("known_hosts", body)
+        # The destination comes from the server-rendered VPS record.
+        self.assertIn("{{ vps.container_id }}", body)
 
 
 if __name__ == "__main__":

@@ -86,6 +86,13 @@ class SSHXIsolationTests(unittest.TestCase):
         db.execute("INSERT INTO users(id,username,is_admin,is_suspended) VALUES(3,'admin',1,0)")
         db.commit()
         sshx.init_sshx_tables(db)
+        # Tests exercise the post-validation state.  A real install starts
+        # contained (see test_k_containment_defaults_closed).
+        db.execute("INSERT OR REPLACE INTO sshx_policy(key,value) VALUES(?,?)",
+                   (sshx.CONTAINED_POLICY, "0"))
+        db.execute("INSERT OR REPLACE INTO sshx_policy(key,value) VALUES(?,?)",
+                   (sshx.GLOBAL_POLICY, "1"))
+        db.commit()
         db.close()
 
     def _create_vps(self, cid, vps_id, user_id, port, status="running"):
@@ -281,6 +288,102 @@ class SSHXIsolationTests(unittest.TestCase):
         self.assertEqual(sshx.get_session(b["id"], 1), None)
         self.assertEqual(sshx.get_session(a["id"], 1)["vps_id"], 1)
         self.assertEqual(sshx.get_session(b["id"], 2)["vps_id"], 2)
+
+    # ── Test K: fail-closed containment on fresh/upgraded installs ───────────
+    def test_k_containment_defaults_closed(self):
+        fresh = os.path.join(self.tmp, "fresh.db")
+        db = sqlite3.connect(fresh)
+        db.execute("CREATE TABLE vps(id INTEGER PRIMARY KEY, ssh_command TEXT)")
+        db.commit()
+        sshx.init_sshx_tables(db)  # additive migration on a "legacy" install
+        db.close()
+        with mock.patch.object(sshx, "DB", fresh):
+            self.assertTrue(sshx.is_contained())
+            self.assertFalse(sshx.is_globally_enabled())
+            ok, reason, _ = sshx.authorize_session(1, 1)
+            self.assertFalse(ok)
+            self.assertIn("maintenance", reason)
+
+    # ── Test L: containment blocks creation and revokes live sessions ────────
+    def test_l_containment_blocks_creation_and_revokes(self):
+        info, err = sshx.create_session(1, 1)
+        self.assertEqual(err, "")
+        sshx.set_contained(True, actor_id=3, reason="test containment")
+        self.assertTrue(sshx.is_contained())
+        self.assertEqual(sshx.get_session(info["id"], 1)["status"], "revoked")
+        info2, err2 = sshx.create_session(1, 1)
+        self.assertIsNone(info2)
+        self.assertIn("maintenance", err2)
+
+    # ── Test M: live sessions revalidated against authorization ──────────────
+    def test_m_live_authorization_revoked(self):
+        info, err = sshx.create_session(1, 1)
+        self.assertEqual(err, "")
+        self.assertTrue(sshx.session_still_active(info["id"]))
+        self.set_user_suspended(1, True)
+        self.assertFalse(sshx.session_still_active(info["id"]))
+        with mock.patch.object(sshx, "_terminate_pid"):
+            n = sshx.enforce_live_authorizations()
+        self.assertGreaterEqual(n, 1)
+        self.assertEqual(sshx.get_session(info["id"], 1)["status"], "revoked")
+
+    # ── Test N: idle sessions are cleaned up ─────────────────────────────────
+    def test_n_idle_timeout(self):
+        info, err = sshx.create_session(1, 1)
+        self.assertEqual(err, "")
+        stale = int(time.time()) - sshx.IDLE_TIMEOUT_SECONDS - 30
+        db = sqlite3.connect(self.db_path)
+        db.execute("UPDATE sshx_sessions SET last_seen=? WHERE id=?", (stale, info["id"]))
+        db.commit()
+        db.close()
+        with mock.patch.object(sshx, "_terminate_pid"):
+            n = sshx.expire_stale_sessions()
+        self.assertGreaterEqual(n, 1)
+        self.assertEqual(sshx.get_session(info["id"], 1)["status"], "expired")
+
+    # ── Test O: duplicate sessions are blocked in-process and in the DB ──────
+    def test_o_duplicate_session_blocked(self):
+        first, err = sshx.create_session(1, 1)
+        self.assertEqual(err, "")
+        second, err2 = sshx.create_session(1, 1)
+        self.assertIsNone(second)
+        self.assertIn("active session", err2)
+        db = sqlite3.connect(self.db_path)
+        with self.assertRaises(sqlite3.IntegrityError):
+            db.execute(
+                "INSERT INTO sshx_sessions(id,user_id,vps_id,container_id,status,"
+                "created_at,expires_at) VALUES('dup-test',1,1,'vps-user1-aaa',"
+                "'active',?,?)", (int(time.time()), int(time.time()) + 900),
+            )
+        db.close()
+
+    # ── Test P: gateway rejects tampered specs / untrusted binaries ──────────
+    def test_p_gateway_rejects_unsafe_specs(self):
+        gateway = (REPO / "gateway" / "sshx_gateway.py").read_text()
+        target = (REPO / "gateway" / "sshx-target-shell").read_text()
+        self.assertIn("CONTAINER_RE", gateway)
+        self.assertIn("_trusted_binary", gateway)
+        self.assertIn('spec.get("ssh_host") != "127.0.0.1"', gateway)
+        self.assertIn('spec.get("ssh_user") != "root"', gateway)
+        self.assertIn('spec.get("ssh_binary"', gateway)
+        self.assertIn("st_mode & 0o022", gateway)
+        self.assertIn("st_mode & 0o077", target)
+        self.assertIn("st_uid != 0", target)
+        self.assertIn('host != "127.0.0.1"', target)
+
+    # ── Test Q: audit trail records lifecycle without secrets ────────────────
+    def test_q_audit_events(self):
+        info, err = sshx.create_session(1, 1)
+        self.assertEqual(err, "")
+        created = sshx.list_events(session_id=info["id"])
+        self.assertTrue(any(e["action"] == "session_created" for e in created))
+        with mock.patch.object(sshx, "_terminate_pid"):
+            sshx.revoke_session(info["id"], actor_id=3, is_admin=True, reason="test")
+        revoked = sshx.list_events(session_id=info["id"])
+        self.assertTrue(any(e["action"] == "session_revoked" for e in revoked))
+        blob = "\n".join(str(e) for e in sshx.list_events())
+        self.assertNotIn(LINK, blob)
+        self.assertNotIn("id_ed25519", blob)
 
 
 if __name__ == "__main__":

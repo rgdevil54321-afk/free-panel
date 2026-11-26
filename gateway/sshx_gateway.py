@@ -19,6 +19,7 @@ import sys
 import time
 
 SESSION_ID_RE = re.compile(r"^[a-f0-9]{32}$")
+CONTAINER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
 LINK_RE = re.compile(r"https://sshx\.io/s/[A-Za-z0-9]+#[A-Za-z0-9_-]+")
 ANSI_RE = re.compile(r"\x1b\[[0-9;]*[a-zA-Z]")
 
@@ -100,6 +101,17 @@ def main() -> int:
     if int(spec.get("expires_at", 0)) <= int(time.time()):
         return 4
 
+    # The destination identity is server-generated.  Reject anything else,
+    # even if an attacker managed to alter the session spec.
+    cid = spec.get("container_id", "")
+    if not CONTAINER_RE.match(cid) or cid in ("pending", "pending-overflow", "overflow-failed"):
+        return 3
+    if spec.get("ssh_host") != "127.0.0.1" or spec.get("ssh_user") != "root":
+        return 3
+    port = spec.get("ssh_port")
+    if not isinstance(port, int) or not 1 <= port <= 65535:
+        return 3
+
     link_path = spec.get("link_path", "")
     log_path = spec.get("log_path", "")
     session_dir = os.path.realpath(os.path.join(root, session_id))
@@ -107,11 +119,18 @@ def main() -> int:
         if not path or os.path.realpath(os.path.dirname(path)) != session_dir:
             return 3
 
+    def _trusted_binary(path: str) -> bool:
+        if not os.path.isfile(path) or not os.access(path, os.X_OK):
+            return False
+        st = os.stat(path)
+        # Executables used by the gateway must be root-owned and not writable
+        # by the service account or by anyone else.
+        return st.st_uid == 0 and not (st.st_mode & 0o022)
+
     sshx = spec.get("sshx_binary", "/opt/sshx/sshx")
     target = spec.get("target_shell", "/opt/sshx/bin/sshx-target-shell")
-    if not os.path.isfile(sshx) or not os.access(sshx, os.X_OK):
-        return 5
-    if not os.path.isfile(target) or not os.access(target, os.X_OK):
+    ssh_client = spec.get("ssh_binary", "/usr/bin/ssh")
+    if not _trusted_binary(sshx) or not _trusted_binary(target) or not _trusted_binary(ssh_client):
         return 5
 
     signal.signal(signal.SIGTERM, _stop)

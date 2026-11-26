@@ -40,9 +40,11 @@ import youtube_integration as youtube_mod
 DB = "panel.db"
 
 app = Flask(__name__)
-# Panel sits behind Cloudflare Tunnel / reverse proxy — trust X-Forwarded-For
-# so request.remote_addr shows the real client IP (not 127.0.0.1).
-app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
+# Only trust X-Forwarded-* when the operator explicitly says the panel sits
+# behind a proxy.  Trusting it by default lets any client spoof its IP and
+# bypass IP-based checks / poison audit logs.
+if os.environ.get("TRUST_PROXY", "0") == "1":
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 
 SECRET_KEY_FILE = "secret.key"
 if os.environ.get("FLASK_SECRET_KEY"):
@@ -128,6 +130,7 @@ def _rate_limit_protect():
 def _audit_log(action: str, target: str = "", detail: str = ""):
     if not current_user.is_authenticated:
         return
+    db = None
     try:
         db = get_db()
         db.execute(
@@ -135,9 +138,14 @@ def _audit_log(action: str, target: str = "", detail: str = ""):
             (current_user.id, action, target, int(time.time())),
         )
         db.commit()
-        db.close()
     except Exception:
         pass
+    finally:
+        if db is not None:
+            try:
+                db.close()
+            except Exception:
+                pass
 
 # ── Constants ────────────────────────────────────────────────────────────────
 ADMIN_MAX_RAM_GB    = 160
@@ -502,6 +510,8 @@ def dashboard():
     if vps and vps["status"] == "running" and vps["container_id"] not in ("pending", "pending-overflow", "overflow-failed"):
         root_password = get_root_password(vps["container_id"])
 
+    sshx_sessions = [s for s in sshx.list_sessions(user_id=current_user.id)
+                     if s.get("status") in ("starting", "active")]
     return render_template("dashboard.html",
         root_password=root_password,
         vps=vps, all_vps=all_vps,
@@ -510,6 +520,10 @@ def dashboard():
         queue_pos=queue_pos, slot_seconds=queue.SLOT_SECONDS,
         can_feedback=can_feedback, limits=limits,
         public_ip=nat.get_public_ip(),
+        sshx_enabled=sshx.is_globally_enabled(),
+        sshx_contained=sshx.is_contained(),
+        sshx_active_session=(next((s for s in sshx_sessions
+                                   if vps and s.get("vps_id") == vps["id"]), None)),
     )
 
 
@@ -767,6 +781,9 @@ def vps_delete(vps_id):
     vps = db.execute("SELECT * FROM vps WHERE id=?", (vps_id,)).fetchone()
     if not vps or (vps["user_id"] != current_user.id and not current_user.is_admin):
         flash("Not found"); return redirect(url_for("dashboard"))
+    # No terminal may outlive the VPS it was authorized for.
+    sshx.revoke_all_sessions(vps_id=vps_id, actor_id=current_user.id,
+                             reason="vps deleted")
     try:
         nat.deprovision_nat(db, vps_id)
     except Exception:
@@ -807,7 +824,14 @@ def sshx_session_create():
             return jsonify({"error": "invalid VPS id"}), 400
     info, error = sshx.create_session(current_user.id, vps_id, request.remote_addr or "")
     if error:
-        return jsonify({"error": error}), 403
+        payload = {"error": error, "maintenance": sshx.is_contained(),
+                   "can_retry": False}
+        if sshx.is_contained() or "maintenance" in error:
+            return jsonify(payload), 503
+        if "limit" in error or "too many" in error:
+            payload["can_retry"] = True
+            return jsonify(payload), 429
+        return jsonify(payload), 403
     return jsonify(info), 201
 
 
@@ -817,12 +841,20 @@ def sshx_session_status(session_id):
     row = sshx.get_session(session_id, current_user.id, current_user.is_admin)
     if not row:
         return jsonify({"error": "not found"}), 404
+    # An owner polling status keeps the session alive.  Admins inspecting do
+    # not count as activity, so an unattended session still expires.
+    if not current_user.is_admin:
+        sshx.touch_session(session_id, current_user.id)
+        row = sshx.get_session(session_id, current_user.id) or row
     return jsonify({
         "id": row["id"],
         "vps_id": row["vps_id"],
         "status": row["status"],
         "created_at": row["created_at"],
         "expires_at": row["expires_at"],
+        "last_seen": row["last_seen"],
+        "maintenance": sshx.is_contained(),
+        "authorized": sshx.session_still_active(session_id) if row["status"] in ("starting", "active") else False,
     })
 
 
@@ -1161,6 +1193,8 @@ def admin_vps_action(vps_id, action):
     vps = db.execute("SELECT * FROM vps WHERE id=?", (vps_id,)).fetchone()
     if not vps: flash("Not found"); return redirect(url_for("admin"))
     if action == "suspend":
+        sshx.revoke_all_sessions(vps_id=vps_id, actor_id=current_user.id,
+                                 reason="vps suspended")
         suspend_vps(vps["container_id"])
         db.execute("UPDATE vps SET status='suspended' WHERE id=?", (vps_id,))
     elif action == "unsuspend":
@@ -1172,6 +1206,8 @@ def admin_vps_action(vps_id, action):
         except Exception as e:
             print(f"[NAT] refresh on unsuspend failed: {e}")
     elif action == "delete":
+        sshx.revoke_all_sessions(vps_id=vps_id, actor_id=current_user.id,
+                                 reason="vps deleted")
         try: nat.deprovision_nat(db, vps_id)
         except: pass
         try: destroy_vps(vps["container_id"])
@@ -1195,6 +1231,8 @@ def admin_vps_action(vps_id, action):
 def admin_user_suspend(user_id):
     if not current_user.is_admin: return "Forbidden", 403
     reason = request.form.get("reason", "").strip()[:200]
+    sshx.revoke_all_sessions(user_id=user_id, actor_id=current_user.id,
+                             reason="user suspended")
     db = get_db()
     db.execute("UPDATE users SET is_suspended=1, suspended_reason=?, suspended_at=? WHERE id=?",
                (reason or "Suspended by admin", int(time.time()), user_id))
@@ -1226,6 +1264,8 @@ def admin_user_delete(user_id):
     if not current_user.is_admin: return "Forbidden", 403
     if user_id == current_user.id:
         flash("Cannot delete yourself"); return redirect(url_for("admin"))
+    sshx.revoke_all_sessions(user_id=user_id, actor_id=current_user.id,
+                             reason="user deleted")
     db = get_db()
     for v in db.execute("SELECT id,container_id FROM vps WHERE user_id=?", (user_id,)).fetchall():
         try: nat.deprovision_nat(db, v["id"])
@@ -1307,6 +1347,9 @@ def admin_vps_bulk():
         except: continue
         vps = db.execute("SELECT * FROM vps WHERE id=?", (vid,)).fetchone()
         if not vps: continue
+        if action in ("delete", "suspend"):
+            sshx.revoke_all_sessions(vps_id=vid, actor_id=current_user.id,
+                                     reason=f"bulk {action}")
         if action == "delete":
             try: nat.deprovision_nat(db, vid)
             except: pass
@@ -1336,6 +1379,9 @@ def admin_users_bulk():
         try: uid = int(uid)
         except: continue
         if uid == current_user.id: continue
+        if action in ("delete", "suspend"):
+            sshx.revoke_all_sessions(user_id=uid, actor_id=current_user.id,
+                                     reason=f"bulk {action}")
         if action == "delete":
             for v in db.execute("SELECT id,container_id FROM vps WHERE user_id=?", (uid,)).fetchall():
                 try: nat.deprovision_nat(db, v["id"])
@@ -1804,11 +1850,52 @@ def admin_sshx():
     if request.method == "POST":
         action = request.form.get("action", "")
         try:
-            if action == "global_toggle":
-                sshx.set_policy("global_enabled",
-                                "0" if sshx.is_globally_enabled() else "1")
-                _audit_log("sshx_global_toggle", "sshx")
-                flash("SSHX global access toggled")
+            if action in ("validate_and_enable", "lift_containment"):
+                if request.form.get("confirm") != "1":
+                    flash("Isolation validation must be confirmed")
+                else:
+                    ok, failures = sshx.verify_environment()
+                    if not ok:
+                        flash("SSHX prerequisites failed: " + ", ".join(failures[:3]))
+                        _audit_log("sshx_validate_failed", "sshx",
+                                   ", ".join(failures[:3]))
+                    else:
+                        sshx.set_contained(False, actor_id=current_user.id,
+                                           reason="admin validation")
+                        sshx.set_policy("global_enabled", "1")
+                        _audit_log("sshx_containment_lifted", "sshx")
+                        flash("SSHX isolation validated; access re-enabled")
+            elif action == "contain":
+                sshx.set_contained(True, actor_id=current_user.id,
+                                   reason="admin containment")
+                sshx.set_policy("global_enabled", "0")
+                _audit_log("sshx_containment_enabled", "sshx")
+                flash("SSHX disabled for all users")
+            elif action == "global_toggle":
+                if sshx.is_contained():
+                    flash("Lift containment after validation first")
+                else:
+                    sshx.set_policy("global_enabled",
+                                    "0" if sshx.is_globally_enabled() else "1")
+                    _audit_log("sshx_global_toggle", "sshx")
+                    flash("SSHX global access toggled")
+            elif action == "revoke_user":
+                uid = int(request.form.get("user_id", 0))
+                n = sshx.revoke_all_sessions(user_id=uid, actor_id=current_user.id,
+                                             reason="admin revoke user")
+                _audit_log("sshx_revoke_user", str(uid))
+                flash(f"Revoked {n} session(s) for user #{uid}")
+            elif action == "revoke_vps":
+                vid = int(request.form.get("vps_id", 0))
+                n = sshx.revoke_all_sessions(vps_id=vid, actor_id=current_user.id,
+                                             reason="admin revoke vps")
+                _audit_log("sshx_revoke_vps", str(vid))
+                flash(f"Revoked {n} session(s) for VPS #{vid}")
+            elif action == "revoke_all":
+                n = sshx.revoke_all_sessions(actor_id=current_user.id,
+                                             reason="admin revoke all")
+                _audit_log("sshx_revoke_all", "sshx")
+                flash(f"Revoked {n} session(s)")
             elif action in ("disable_user", "enable_user"):
                 uid = int(request.form.get("user_id", 0))
                 sshx.set_disabled("user", uid, action == "disable_user",
@@ -1837,6 +1924,7 @@ def admin_sshx():
     users = db.execute("SELECT id,username,is_suspended FROM users ORDER BY username").fetchall()
     vpses = db.execute("SELECT id,container_id,user_id,status FROM vps ORDER BY id").fetchall()
     db.close()
+    prereq_ok, prereq_failures = sshx.verify_environment()
     return render_template(
         "admin_sshx.html",
         sessions=sshx.list_sessions(),
@@ -1846,6 +1934,9 @@ def admin_sshx():
         users=users,
         vpses=vpses,
         global_enabled=sshx.is_globally_enabled(),
+        contained=sshx.is_contained(),
+        prereq_ok=prereq_ok,
+        prereq_failures=prereq_failures,
     )
 
 
