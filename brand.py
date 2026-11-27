@@ -17,6 +17,121 @@ FETCH_WRAPPERS = (
 
 IDENTITY = 'Ubuntu 24.04 LTS'
 
+# A chroot shares the host kernel, so tools like df/nproc report the host's
+# disk and CPU count.  These small shims read the per-VPS plan written to
+# /etc/vps-limits by vps.py and rewrite only the values the customer sees.
+DF_SHIM = r'''#!/bin/sh
+# Plan-aware df: rewrite the root filesystem row using the VPS disk allowance.
+REAL_DF=""
+for candidate in /usr/bin/df /bin/df; do
+    [ -x "$candidate" ] && REAL_DF="$candidate" && break
+done
+if [ -z "$REAL_DF" ]; then
+    echo "df: real df binary not found" >&2
+    exit 127
+fi
+
+output=$("$REAL_DF" "$@" 2>&1)
+status=$?
+if [ "$status" -ne 0 ]; then
+    printf '%s\n' "$output" >&2
+    exit "$status"
+fi
+
+disk_gb=""
+if [ -r /etc/vps-limits ]; then
+    disk_gb=$(sed -n 's/^DISK_GB=//p' /etc/vps-limits 2>/dev/null | head -n 1 | tr -dc '0-9')
+fi
+case "$disk_gb" in
+    ''|*[!0-9]*) printf '%s\n' "$output"; exit "$status" ;;
+esac
+[ "$disk_gb" -gt 0 ] || { printf '%s\n' "$output"; exit "$status"; }
+
+printf '%s\n' "$output" | awk -v gb="$disk_gb" '
+function toblocks(s,   u, v) {
+    u = substr(s, length(s), 1)
+    if (u ~ /[A-Za-z]/) {
+        v = substr(s, 1, length(s) - 1) + 0
+        if (u == "K" || u == "k") return v
+        if (u == "M") return v * 1024
+        if (u == "G") return v * 1048576
+        if (u == "T") return v * 1073741824
+        if (u == "P") return v * 1099511627776
+    }
+    return s + 0
+}
+function fmtg(blocks,   v) {
+    v = blocks / 1048576
+    if (v >= 10) return sprintf("%.0fG", v)
+    return sprintf("%.1fG", v)
+}
+NR == 1 { print; next }
+{
+    if ($NF != "/" || $5 !~ /^[0-9]+%$/) { print; next }
+    human = (substr($2, length($2), 1) ~ /[A-Za-z]/)
+    total_real = toblocks($2)
+    used_real = toblocks($3)
+    total = gb * 1048576
+    used = (total_real > 0) ? int(total * used_real / total_real) : 0
+    if (used > total) used = total
+    avail = total - used
+    pct = (total > 0) ? int(used * 100 / total + 0.5) : 0
+    if (human) {
+        $2 = gb "G"; $3 = fmtg(used); $4 = fmtg(avail)
+    } else {
+        $2 = total; $3 = used; $4 = avail
+    }
+    $5 = pct "%"
+    print
+}'
+exit "$status"
+'''
+
+NPROC_SHIM = r'''#!/bin/sh
+# Plan-aware nproc: report the VPS CPU allowance instead of the host's count.
+cores=""
+if [ -r /etc/vps-limits ]; then
+    cores=$(sed -n 's/^CPU_CORES=//p' /etc/vps-limits 2>/dev/null | head -n 1 | tr -dc '0-9')
+fi
+case "$cores" in
+    ''|*[!0-9]*) cores=0 ;;
+esac
+if [ "$cores" -gt 0 ]; then
+    printf '%s\n' "$cores"
+    exit 0
+fi
+for candidate in /usr/bin/nproc /bin/nproc; do
+    [ -x "$candidate" ] && exec "$candidate" "$@"
+done
+echo "nproc: real nproc binary not found" >&2
+exit 127
+'''
+
+RESOURCE_SHIMS = (
+    ("usr/local/bin/df", DF_SHIM),
+    ("usr/local/bin/nproc", NPROC_SHIM),
+)
+
+
+def install_resource_shims(root: str) -> bool:
+    """Install df/nproc plan shims into a guest root. Returns True if changed."""
+    changed = False
+    for rel, script in RESOURCE_SHIMS:
+        path = os.path.join(root, rel.lstrip("/"))
+        try:
+            if os.path.isfile(path):
+                with open(path, "r", encoding="utf-8", errors="replace") as f:
+                    if f.read() == script:
+                        continue
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(script)
+            os.chmod(path, 0o755)
+            changed = True
+        except OSError:
+            pass
+    return changed
+
 
 def clean_guest_root(root: str) -> bool:
     """Remove legacy fake fetch wrappers from one guest root filesystem.
@@ -83,6 +198,10 @@ def clean_guest_root(root: str) -> bool:
                 changed = True
     except OSError:
         pass
+
+    # Plan-aware df/nproc (host disk/CPU must not leak to the customer).
+    if install_resource_shims(root):
+        changed = True
 
     return changed
 
@@ -240,6 +359,13 @@ true
         inst.execute(["bash", "-c", script], environment=env)
     except Exception as e:
         print(f"[BRAND] guest setup failed: {e}")
+
+    # --- host-side: plan-aware df/nproc shims (no apt/network needed) ---
+    try:
+        import vps as _vps
+        install_resource_shims(_vps._path(inst.name))
+    except Exception as e:
+        print(f"[BRAND] resource shims failed: {e}")
 
     # --- host-side: block cloud metadata endpoints from this container ---
     try:

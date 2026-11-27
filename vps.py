@@ -339,6 +339,55 @@ _MEMINFO_SCALED_KEYS = frozenset({
 })
 
 
+def _write_guest_limits(name: str, cpu: int, ram_mb: int, disk_gb: int) -> bool:
+    """Write the recorded plan limits where guest tools can read them."""
+    path = os.path.join(_path(name), "etc", "vps-limits")
+    try:
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(f"CPU_CORES={cpu}\nRAM_MB={ram_mb}\nDISK_GB={disk_gb}\n")
+        os.chmod(path, 0o644)
+        return True
+    except Exception as e:
+        print(f"[vps] could not write guest limits for {name}: {e}")
+        return False
+
+
+def _guest_cpuinfo_source(name: str) -> str:
+    return os.path.join(_path(name), "etc", "vps-cpuinfo")
+
+
+def _write_guest_cpuinfo(name: str, cores: int) -> bool:
+    """Keep only the customer's allotted CPUs in the guest's cpuinfo."""
+    try:
+        with open("/proc/cpuinfo", "r", encoding="utf-8", errors="replace") as f:
+            blocks = [b for b in re.split(r"\n\s*\n", f.read().strip()) if b.strip()]
+        if not blocks:
+            return False
+        selected = [blocks[i % len(blocks)] for i in range(cores)]
+        path = _guest_cpuinfo_source(name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write("\n\n".join(selected) + "\n")
+        os.chmod(path, 0o644)
+        return True
+    except Exception as e:
+        print(f"[vps] CPU projection failed for {name}: {e}")
+        return False
+
+
+def _apply_guest_cpuinfo(name: str) -> bool:
+    cores = int((_load_meta(name) or {}).get("cpu", 0) or 0)
+    if cores <= 0:
+        return False
+    proc_cpuinfo = os.path.join(_path(name), "proc", "cpuinfo")
+    if not os.path.exists(proc_cpuinfo):
+        return False
+    if not _write_guest_cpuinfo(name, cores):
+        return False
+    return _mount_bind(_guest_cpuinfo_source(name), proc_cpuinfo)
+
+
 def _guest_meminfo_source(name: str) -> str:
     return os.path.join(_path(name), "etc", "vps-meminfo")
 
@@ -392,14 +441,30 @@ def _apply_guest_meminfo(name: str) -> bool:
 
 
 def apply_guest_limits(name: str) -> dict:
-    """Reapply recorded resource limits to a running guest (idempotent)."""
+    """Reapply recorded plan limits to a guest (idempotent).
+
+    The limits file is written even for stopped VPSes so the guest's df/nproc
+    shims are ready as soon as it boots; /proc projections need a running VPS.
+    """
+    meta = _load_meta(name) or {}
+
+    def _int(key: str) -> int:
+        try:
+            return int(meta.get(key, 0) or 0)
+        except (TypeError, ValueError):
+            return 0
+
+    cpu, ram_mb, disk_gb = _int("cpu"), _int("ram_mb"), _int("disk_gb")
+    limits_ok = _write_guest_limits(name, cpu, ram_mb, disk_gb)
     proc_ok = _is_mounted(os.path.join(_path(name), "proc"))
     meminfo_ok = _apply_guest_meminfo(name) if proc_ok else False
-    return {"proc": proc_ok, "meminfo": meminfo_ok}
+    cpuinfo_ok = _apply_guest_cpuinfo(name) if proc_ok else False
+    return {"proc": proc_ok, "meminfo": meminfo_ok,
+            "cpuinfo": cpuinfo_ok, "limits": limits_ok}
 
 
 def apply_guest_limits_to_all() -> int:
-    """Reapply RAM projection to every VPS in the database. Returns count."""
+    """Reapply plan projections to every VPS in the database. Returns count."""
     try:
         db = sqlite3.connect(DB)
         names = [r[0] for r in db.execute("SELECT container_id FROM vps")]
@@ -409,14 +474,19 @@ def apply_guest_limits_to_all() -> int:
     applied = 0
     for name in names:
         try:
-            ram_mb = int((_load_meta(name) or {}).get("ram_mb", 0) or 0)
-            ok = apply_guest_limits(name)["meminfo"]
-            print(f"[vps] {name}: RAM limit {ram_mb} MB -> guest meminfo "
+            meta = _load_meta(name) or {}
+            ram_mb = int(meta.get("ram_mb", 0) or 0)
+            cpu = int(meta.get("cpu", 0) or 0)
+            disk_gb = int(meta.get("disk_gb", 0) or 0)
+            result = apply_guest_limits(name)
+            ok = result.get("meminfo") or result.get("cpuinfo")
+            print(f"[vps] {name}: RAM {ram_mb} MB / CPU {cpu} cores / "
+                  f"disk {disk_gb} GB -> guest limits "
                   f"{'projected' if ok else 'not applied (VPS stopped?)'}")
             if ok:
                 applied += 1
         except Exception as e:
-            print(f"[vps] {name}: RAM projection error: {e}")
+            print(f"[vps] {name}: guest limit projection error: {e}")
     return applied
 
 
@@ -451,20 +521,37 @@ def _prepare_runtime(name: str) -> dict:
                        "nosuid,nodev,noexec,mode=1777,size=64m")
     proc_ok = _mount_fs("proc", "proc", os.path.join(root, "proc"))
 
-    meminfo_ok = False
+    limits_ok = meminfo_ok = cpuinfo_ok = False
+    try:
+        meta = _load_meta(name) or {}
+        limits_ok = _write_guest_limits(
+            name,
+            int(meta.get("cpu", 0) or 0),
+            int(meta.get("ram_mb", 0) or 0),
+            int(meta.get("disk_gb", 0) or 0),
+        )
+    except Exception as e:
+        print(f"[vps] guest limits file failed for {name}: {e}")
+
     if proc_ok:
         try:
             meminfo_ok = _apply_guest_meminfo(name)
         except Exception as e:
             print(f"[vps] guest RAM projection failed for {name}: {e}")
+        try:
+            cpuinfo_ok = _apply_guest_cpuinfo(name)
+        except Exception as e:
+            print(f"[vps] guest CPU projection failed for {name}: {e}")
 
     return {"proc": proc_ok, "devpts": pts_ok, "shm": shm_ok,
-            "meminfo": meminfo_ok}
+            "meminfo": meminfo_ok, "cpuinfo": cpuinfo_ok,
+            "limits": limits_ok}
 
 
 def _teardown_runtime(name: str):
     root = _path(name)
     _umount(os.path.join(root, "proc", "meminfo"))
+    _umount(os.path.join(root, "proc", "cpuinfo"))
     for sub in ("proc", "dev/shm", "dev/pts", "sys"):
         _umount(os.path.join(root, sub))
 
@@ -1003,6 +1090,14 @@ def _finalize_base(root: str):
                 os.remove(os.path.join(root, "etc", "ssh", fn))
             except Exception:
                 pass
+
+    # Guest-facing shims: a chroot sees the host's disk/CPU, so df and nproc
+    # report the plan limits written to /etc/vps-limits instead.
+    try:
+        from brand import install_resource_shims
+        install_resource_shims(root)
+    except Exception as e:
+        print(f"[base] resource shims failed: {e}")
 
 
 def _sshd_config(port: int) -> str:

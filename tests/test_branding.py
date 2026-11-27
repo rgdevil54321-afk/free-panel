@@ -2,6 +2,7 @@
 
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -26,6 +27,69 @@ class NaturalNeofetchTests(unittest.TestCase):
         self.assertNotIn('PRETTY_NAME="Venlix', src)
         self.assertIn('PRETTY_NAME="Ubuntu 24.04 LTS"', src)
         self.assertIn('NAME="Ubuntu"', src)
+
+
+class ResourceShimTests(unittest.TestCase):
+    """Guest df/nproc shims must report the recorded plan, not host totals."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp(prefix="shim-test-")
+        self.limits = os.path.join(self.tmp, "vps-limits")
+        with open(self.limits, "w") as f:
+            f.write("CPU_CORES=4\nRAM_MB=16384\nDISK_GB=80\n")
+
+    def tearDown(self):
+        shutil.rmtree(self.tmp, ignore_errors=True)
+
+    def _run_shim(self, script: str, *args: str):
+        path = os.path.join(self.tmp, "shim")
+        with open(path, "w") as f:
+            f.write(script)
+        return subprocess.run(["sh", path, *args],
+                              capture_output=True, text=True, timeout=15)
+
+    def test_shims_are_valid_shell(self):
+        for script in (brand.DF_SHIM, brand.NPROC_SHIM):
+            path = os.path.join(self.tmp, "syntax")
+            with open(path, "w") as f:
+                f.write(script)
+            result = subprocess.run(["sh", "-n", path],
+                                    capture_output=True, text=True, timeout=15)
+            self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_install_resource_shims_is_idempotent(self):
+        root = os.path.join(self.tmp, "guest")
+        self.assertTrue(brand.install_resource_shims(root))
+        for rel in ("usr/local/bin/df", "usr/local/bin/nproc"):
+            path = os.path.join(root, rel)
+            self.assertTrue(os.path.isfile(path))
+            self.assertTrue(os.access(path, os.X_OK))
+        self.assertFalse(brand.install_resource_shims(root))
+
+    def test_df_shim_rewrites_only_root_row(self):
+        fake_df = os.path.join(self.tmp, "real-df")
+        with open(fake_df, "w") as f:
+            f.write("#!/bin/sh\n"
+                    "printf '%s\\n' "
+                    "'Filesystem Size Used Avail Use% Mounted on' "
+                    "'/dev/root 967G 25G 943G 3% /' "
+                    "'tmpfs 126G 0 126G 0% /dev'\n")
+        os.chmod(fake_df, 0o755)
+        script = (brand.DF_SHIM
+                  .replace("/usr/bin/df", fake_df)
+                  .replace("/etc/vps-limits", self.limits))
+        result = self._run_shim(script, "-P", "-h", "/")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        lines = result.stdout.splitlines()
+        self.assertIn("80G", lines[1])
+        self.assertNotIn("967G", result.stdout)
+        self.assertIn("126G", result.stdout)
+
+    def test_nproc_shim_reports_plan_cores(self):
+        script = brand.NPROC_SHIM.replace("/etc/vps-limits", self.limits)
+        result = self._run_shim(script)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), "4")
 
 
 class ExistingGuestCleanupTests(unittest.TestCase):
