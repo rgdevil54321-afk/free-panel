@@ -934,6 +934,7 @@ class ServiceManager:
 
     def __init__(self, log: Logger):
         self.log = log
+        self.last_error = ""
 
     def has_systemd(self) -> bool:
         return os.path.exists("/run/systemd/system")
@@ -964,10 +965,10 @@ class ServiceManager:
                                      capture_output=True, text=True, timeout=30)
             if restart.returncode != 0:
                 detail = (restart.stderr or restart.stdout or "").strip()[-500:]
-                self.log.error(
-                    "Failed to restart panel service: "
-                    + (detail or f"systemctl exit {restart.returncode}")
-                )
+                message = (detail or f"systemctl exit {restart.returncode}")
+                self.last_error = f"systemctl restart failed: {message}"
+                self.log.error("Failed to restart panel service: " + message)
+                self._log_journal()
                 return False
 
             # Give the service a moment to bind before the first probe.
@@ -986,15 +987,31 @@ class ServiceManager:
             state = subprocess.run(
                 ["systemctl", "is-active", SERVICE],
                 capture_output=True, text=True, timeout=10,
-            ).stdout.strip()
+            ).stdout.strip() or "unknown"
+            self.last_error = f"no HTTP response on port {port}; service {state}"
             self.log.error(
                 "Panel did not respond to health check on port "
-                f"{port} (service state: {state or 'unknown'})"
+                f"{port} (service state: {state})"
             )
+            self._log_journal()
             return False
         except Exception as e:
+            self.last_error = f"{type(e).__name__}: {e}"
             self.log.error("Failed to start panel", e)
             return False
+
+    def _log_journal(self):
+        """Put the last few service log lines into install.log on failure."""
+        try:
+            result = subprocess.run(
+                ["journalctl", "-u", SERVICE, "-n", "20", "--no-pager", "-o", "cat"],
+                capture_output=True, text=True, timeout=20,
+            )
+            lines = (result.stdout or "").strip()
+            if lines:
+                self.log.error("Recent panel journal:\n" + lines[-2000:])
+        except Exception:
+            pass
 
     def start_cloudflare(self, token: str, port: int) -> bool:
         """Set up and start Cloudflare Tunnel."""
@@ -1523,12 +1540,13 @@ class Installer:
             UI.err("Reinstall failed — attempting repair")
             self._repair_panel(port)
 
-    def _clean_guest_identity(self):
+    def _clean_guest_identity(self, install_fetch: bool = True):
         """Remove legacy fake neofetch wrappers from every existing guest."""
         sys.path.insert(0, REPO_DIR)
         try:
             import brand
-            cleaned, total, installed = brand.clean_existing_guests(CHROOT_ROOT)
+            cleaned, total, installed = brand.clean_existing_guests(
+                CHROOT_ROOT, install_fetch=install_fetch)
             if cleaned or installed:
                 UI.ok(
                     f"Guest identity cleaned ({cleaned}/{total} roots); "
@@ -1554,7 +1572,9 @@ class Installer:
                 self.log.warn(f"git pull failed: {e}")
         self.dep_manager.install_python_deps()
         self.sshx_hardening.apply()
-        self._clean_guest_identity()
+        # Keep updates fast: remove the fake wrappers now, install real fetch
+        # only during --repair (it can run apt inside the base rootfs).
+        self._clean_guest_identity(install_fetch=False)
         self.config_mgr.write_config(self._select_port())
         self.config_mgr.install_cli()
         self.config_mgr.write_service(self._select_port(), CHROOT_ROOT)
@@ -1562,7 +1582,7 @@ class Installer:
         if self.service_mgr.start_panel(port):
             UI.ok("Panel updated and running")
         else:
-            UI.err("Update failed — check logs")
+            UI.err("Update failed — " + (self.service_mgr.last_error or "check logs"))
 
     def _do_repair(self):
         """Detect and repair broken components."""
@@ -1721,7 +1741,8 @@ class Installer:
             if self.service_mgr.start_panel(port):
                 UI.ok(f"Panel restarted on port {port}")
             else:
-                UI.err("Failed to restart panel")
+                UI.err("Failed to restart panel — "
+                       + (self.service_mgr.last_error or "check logs"))
         elif action == "status":
             self._do_diagnose()
         elif action == "logs":

@@ -180,6 +180,12 @@ class ServiceRestartTests(unittest.TestCase):
             self.assertFalse(mgr.start_panel(5000))
         logged = " ".join(str(c) for c in log.error.call_args_list)
         self.assertIn("service state: failed", logged)
+        self.assertIn("port 5000", mgr.last_error)
+        self.assertIn("failed", mgr.last_error)
+
+    def test_update_cleans_guests_without_slow_apt_install(self):
+        src = (REPO / "installer.py").read_text()
+        self.assertIn("self._clean_guest_identity(install_fetch=False)", src)
 
 
 if __name__ == "__main__":

@@ -93,7 +93,8 @@ class ExistingGuestCleanupTests(unittest.TestCase):
 
     def test_update_and_repair_both_clean_guest_identity(self):
         src = (REPO / "installer.py").read_text()
-        self.assertGreaterEqual(src.count("self._clean_guest_identity()"), 2)
+        self.assertGreaterEqual(src.count("self._clean_guest_identity("), 2)
+        self.assertIn("self._clean_guest_identity(install_fetch=False)", src)
 
 
 if __name__ == "__main__":
