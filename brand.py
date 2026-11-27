@@ -13,10 +13,10 @@ HN="vps-$(tr -dc 'a-z0-9' </dev/urandom 2>/dev/null | head -c 6)"
 echo "$HN" > /etc/hostname
 hostname "$HN" 2>/dev/null || true
 
-# --- OS release branding (keeps apt working, changes display name) ---
+# --- restore natural Ubuntu identity (remove old Venlix branding) ---
 if [ -f /etc/os-release ]; then
-  sed -i 's/^PRETTY_NAME=.*/PRETTY_NAME="Venlix Nodes VPS (Ubuntu-based)"/' /etc/os-release
-  sed -i 's/^NAME=.*/NAME="Venlix Nodes VPS"/' /etc/os-release
+  sed -i 's/^PRETTY_NAME=.*/PRETTY_NAME="Ubuntu 24.04 LTS"/' /etc/os-release
+  sed -i 's/^NAME=.*/NAME="Ubuntu"/' /etc/os-release
 fi
 
 # --- disable cloud-init / metadata agents ---
@@ -25,35 +25,12 @@ systemctl disable cloud-init cloud-init-local cloud-config cloud-final 2>/dev/nu
 systemctl mask cloud-init 2>/dev/null || true
 rm -rf /var/lib/cloud/instance /var/lib/cloud/instances/* 2>/dev/null || true
 
-# --- custom fetch wrappers (override neofetch/fastfetch/screenfetch) ---
-cat > /usr/local/bin/neofetch <<'FETCH'
-#!/bin/bash
-echo "        _   _  ____  _   _ _     ___  ____  "
-echo "       | | | |/ ___|| | | | |   / _ \\|  _ \\ "
-echo "       | | | | |  _ | |_| | |  | | | | |_) |"
-echo "       | |_| | |_| ||  _  | |__| |_| |  __/ "
-echo "        \\___/ \\____||_| |_|_____\\___/|_|    "
-echo ""
-echo "OS:       Venlix Nodes VPS"
-echo "Host:     Venlix Nodes Cloud"
-echo "Kernel:   $(uname -r)"
-echo "Uptime:   $(uptime -p 2>/dev/null || uptime)"
-echo "Packages: $(dpkg -l 2>/dev/null | grep -c '^i' || echo 0) (dpkg)"
-echo "Shell:    $(basename "${SHELL:-/bin/bash}")"
-echo "CPU:      Virtual CPU (isolated)"
-echo "Memory:   $(free -h 2>/dev/null | awk '/^Mem:/ {print $3" / "$2}')"
-echo "Disk:     $(df -h / 2>/dev/null | awk 'NR==2 {print $3" / "$2}')"
-FETCH
-chmod +x /usr/local/bin/neofetch
-cp -f /usr/local/bin/neofetch /usr/local/bin/fastfetch
-cp -f /usr/local/bin/neofetch /usr/local/bin/screenfetch
+# --- remove stale fake fetch wrappers so real neofetch/fastfetch can work ---
+rm -f /usr/local/bin/neofetch /usr/local/bin/fastfetch /usr/local/bin/screenfetch
 
-# --- motd / issue ---
-cat > /etc/motd <<'MOTD'
-  Welcome to Venlix Nodes VPS
-  Type 'neofetch' to see system info.
-MOTD
-echo 'Venlix Nodes VPS' > /etc/issue 2>/dev/null || true
+# --- restore default login banner ---
+rm -f /etc/motd
+printf 'Ubuntu 24.04 LTS \\l\n' > /etc/issue 2>/dev/null || true
 
 true
 '''
