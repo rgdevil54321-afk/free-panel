@@ -64,6 +64,10 @@ TARGET_SHELL = os.environ.get(
 SSHX_BINARY = os.environ.get("SSHX_BINARY", "/opt/sshx/sshx")
 SSH_BINARY = os.environ.get("SSHX_SSH_BINARY", "/usr/bin/ssh")
 KEYGEN_BINARY = os.environ.get("SSHX_KEYGEN_BINARY", "/usr/bin/ssh-keygen")
+# The gateway uses only the standard library.  It must not inherit the panel's
+# venv interpreter: the sshx-gw account may not be able to traverse the repo
+# directory (e.g. /root/free-panel or /home/<user>/free-panel).
+GATEWAY_PYTHON = os.environ.get("SSHX_GATEWAY_PYTHON", "/usr/bin/python3")
 
 SESSION_TTL_SECONDS = int(os.environ.get("SSHX_SESSION_TTL", "900"))       # 15 min
 LINK_WAIT_SECONDS = float(os.environ.get("SSHX_LINK_WAIT", "12"))
@@ -275,7 +279,8 @@ def verify_environment() -> tuple[bool, list[str]]:
         except KeyError:
             failures.append("sshx-gw service account missing")
     for label, path in (("gateway", GATEWAY_SCRIPT), ("target shell", TARGET_SHELL),
-                        ("sshx client", SSHX_BINARY), ("ssh client", SSH_BINARY)):
+                        ("sshx client", SSHX_BINARY), ("ssh client", SSH_BINARY),
+                        ("gateway python", GATEWAY_PYTHON)):
         if not os.path.isfile(path) or not os.access(path, os.X_OK):
             failures.append(f"{label} missing or not executable: {path}")
         else:
@@ -557,7 +562,7 @@ def _spawn_gateway(session_id: str, link_path: str, log_path: str) -> int:
         kwargs["preexec_fn"] = _demote
     try:
         proc = subprocess.Popen(
-            [sys.executable, GATEWAY_SCRIPT, session_id], **kwargs
+            [GATEWAY_PYTHON, GATEWAY_SCRIPT, session_id], **kwargs
         )
     finally:
         logf.close()

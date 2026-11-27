@@ -471,7 +471,10 @@ def add_member_to_guild(server_id: str, discord_id: str, access_token: str) -> t
 
 def get_guild_info(server_id: str) -> dict | None:
     """Get basic info about a guild."""
-    if not server_id:
+    ok, _ = check_guild_access(server_id)
+    # Existing callers only need the payload; diagnostics use the detailed
+    # check below.
+    if not ok:
         return None
     try:
         resp = requests.get(
@@ -479,11 +482,35 @@ def get_guild_info(server_id: str) -> dict | None:
             headers=_bot_headers(),
             timeout=15,
         )
-        if resp.status_code == 200:
-            return resp.json()
-        return None
+        return resp.json() if resp.status_code == 200 else None
     except Exception:
         return None
+
+
+def check_guild_access(server_id: str) -> tuple[bool, str]:
+    """Return an actionable reason when a promotion guild is unreachable."""
+    if not server_id:
+        return False, "No server ID configured"
+    if not _get_bot_token():
+        return False, "No bot token configured — paste it in /admin/discord and Save"
+    try:
+        resp = requests.get(
+            f"{DISCORD_API}/guilds/{server_id}",
+            headers=_bot_headers(),
+            timeout=15,
+        )
+    except Exception as exc:
+        return False, f"Discord request failed: {exc}"
+    if resp.status_code == 200:
+        return True, f"Connected: {resp.json().get('name', 'unknown')}"
+    if resp.status_code == 401:
+        return False, "Bot token invalid — paste the token again and Save"
+    if resp.status_code == 403:
+        return False, ("Bot is not in this server or lacks View Server permission "
+                       "— invite the bot with the bot scope")
+    if resp.status_code == 404:
+        return False, "Server ID not found or the bot is not a member"
+    return False, f"Discord API returned {resp.status_code}"
 
 
 # ── Promotion slot management ──────────────────────────────────────────────
@@ -548,14 +575,13 @@ def test_promotion_slot(slot_number: int) -> tuple[bool, str]:
     db.close()
     if not row or not row["server_id"]:
         return False, "No server ID configured"
-    info = get_guild_info(row["server_id"])
-    if info:
-        update_promotion_slot(slot_number, last_check_status="connected",
-                              last_check_at=int(time.time()))
-        return True, f"Connected: {info.get('name', 'unknown')}"
-    update_promotion_slot(slot_number, last_check_status="disconnected",
-                          last_check_at=int(time.time()))
-    return False, "Could not connect to server"
+    ok, msg = check_guild_access(row["server_id"])
+    update_promotion_slot(
+        slot_number,
+        last_check_status="connected" if ok else "disconnected",
+        last_check_at=int(time.time()),
+    )
+    return ok, msg
 
 
 # ── Membership verification ─────────────────────────────────────────────────

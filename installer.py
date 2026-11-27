@@ -876,6 +876,9 @@ User=root
 KillMode=process
 TasksMax=infinity
 WorkingDirectory={repo_dir}
+# Optional operator config (.env) is loaded so TRUST_PROXY, IP_INTEL_ENABLED
+# and other documented switches actually reach app.py. Missing file is fine.
+EnvironmentFile=-{repo_dir}/.env
 Environment=PYTHONUNBUFFERED=1
 Environment=PANEL_HOST=0.0.0.0
 Environment=PANEL_PORT={port}
@@ -1148,7 +1151,10 @@ class SSHXHardening:
         try:
             import pwd
             u = pwd.getpwnam(self.USER)
-            for d in (self.HOME, os.path.join(self.SESSION_ROOT, "sessions")):
+            # The gateway must be able to traverse SESSION_ROOT to reach each
+            # <session_id>/ directory created by sshx_manager._session_dir().
+            for d in (self.HOME, self.SESSION_ROOT,
+                      os.path.join(self.SESSION_ROOT, "sessions")):
                 os.chown(d, u.pw_uid, u.pw_gid)
                 os.chmod(d, 0o700)
         except Exception as e:

@@ -386,5 +386,33 @@ class SSHXIsolationTests(unittest.TestCase):
         self.assertNotIn("id_ed25519", blob)
 
 
+class GatewayLaunchTests(unittest.TestCase):
+    """Regression tests for gateway startup on a real installation."""
+
+    def test_gateway_uses_system_python_not_panel_venv(self):
+        session_id = "a" * 32
+        with tempfile.TemporaryDirectory(prefix="sshx-launch-") as tmp:
+            log_path = os.path.join(tmp, "gateway.log")
+            with mock.patch.object(sshx, "_gateway_ids", return_value=(1000, 1000)), \
+                 mock.patch.object(sshx.subprocess, "Popen") as popen:
+                sshx._spawn_gateway(
+                    session_id,
+                    os.path.join(tmp, "link.txt"),
+                    log_path,
+                )
+            argv = popen.call_args[0][0]
+            kwargs = popen.call_args[1]
+            self.assertEqual(argv[0], sshx.GATEWAY_PYTHON)
+            self.assertNotEqual(argv[0], sys.executable)
+            self.assertEqual(argv[1], sshx.GATEWAY_SCRIPT)
+            self.assertEqual(argv[2], session_id)
+            self.assertEqual(kwargs.get("user"), 1000)
+            self.assertTrue(os.path.isfile(log_path))
+
+    def test_verify_environment_checks_gateway_python(self):
+        src = (REPO / "sshx_manager.py").read_text()
+        self.assertIn('("gateway python", GATEWAY_PYTHON)', src)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

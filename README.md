@@ -122,6 +122,27 @@ Additional commands:
 - `--cloudflare` — Connect Cloudflare Tunnel
 - `--no-color` — Disable colored output
 
+### Cloudflare Tunnel route
+
+The installer writes the tunnel token to `/etc/cloudflared/token` and runs
+`cloudflared` with `tunnel run`. The public hostname is configured in the
+Cloudflare Zero Trust dashboard, not in this repo:
+
+- **Tunnel → Public Hostname → Add a public hostname**
+- Subdomain/domain: e.g. `panel` / `example.com`
+- **Service Type:** `HTTP`
+- **URL:** `localhost:<panel port>` — take the port from `.panel-port`
+  (`5000` by default). `cloudflared` runs on the same VPS as the panel.
+- **Path:** leave empty (`/`)
+
+Cloudflare terminates TLS at the edge; the origin service is plain HTTP. Add
+`https://panel.example.com/discord/callback` to the Discord OAuth2 redirect
+URLs and paste the same value into `/admin/discord`.
+
+If **all** traffic comes through the tunnel, set `TRUST_PROXY=1` in `.env` and
+run `panel --restart`. The systemd unit loads `.env`, so the setting survives
+upgrades. Do not enable it while the origin port is directly reachable.
+
 ## Environment variables
 
 | Variable | Default | Meaning |
@@ -166,6 +187,8 @@ Common causes:
 | Base rootfs build failed | check internet; `apt-get install -y debootstrap`; retry |
 | SSH login has no PTY | provider blocks `mount`; ask for `CAP_SYS_ADMIN`/privileged |
 | Panel unreachable from browser | open the panel port in the provider firewall/security group |
+| SSHX says “could not start session” | run `panel --repair`, then check `/var/lib/deup-vps/sshx/<session-id>/gateway.log` and `panel --diagnose`; sessions require the `sshx-gw` account, `/opt/sshx` binaries and an enabled policy in `/admin/sshx` |
+| Promotion server shows disconnected | invite the bot to that server, then use `Test` in `/admin/discord`; also confirm its invite URL and OAuth redirect are set |
 | Lost admin password | `panel` → 9) Reset admin password |
 
 Per-VPS sshd logs:

@@ -115,6 +115,19 @@ class InstallerSafetyTests(unittest.TestCase):
         # install, reinstall, update, repair and repair_panel
         self.assertGreaterEqual(src.count("self.config_mgr.install_cli()"), 5)
 
+    def test_systemd_unit_loads_env_file(self):
+        src = (REPO / "installer.py").read_text()
+        self.assertIn("EnvironmentFile=-{repo_dir}/.env", src)
+        # Explicit settings below EnvironmentFile must not be overridden by it.
+        self.assertLess(
+            src.index("EnvironmentFile=-{repo_dir}/.env"),
+            src.index("Environment=PANEL_PORT={port}"),
+        )
+
+    def test_sshx_session_root_is_traversable_by_gateway(self):
+        src = (REPO / "installer.py").read_text()
+        self.assertIn("self.HOME, self.SESSION_ROOT,", src)
+
     def test_sshx_migrations_are_additive_only(self):
         src = (REPO / "sshx_manager.py").read_text()
         self.assertNotIn("DROP TABLE", src)

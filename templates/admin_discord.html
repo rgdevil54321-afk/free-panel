@@ -169,10 +169,11 @@
       <li>Create a bot under the application → copy the Bot Token</li>
       <li>Enable <strong>Server Members Intent</strong> in the bot settings (Privileged Gateway Intents)</li>
       <li>Set OAuth2 redirect URL to <code>{{ config.get('oauth_redirect_url', 'your-panel-url/discord/callback') }}</code></li>
-      <li>Add bot to your servers with <code>bot</code> + <code>applications.commands</code> scopes</li>
-      <li>Fill in all fields above and click Save</li>
-      <li>Configure promotion slots (1-5) with server IDs and invite URLs</li>
-      <li>Test bot connection above</li>
+      <li>Invite the bot to the main server and every promotion server with the <code>bot</code> scope and permission to view members; auto-join also needs permission to add members</li>
+      <li>Add <code>https://your-panel/discord/callback</code> to the OAuth2 redirects in the Discord developer portal and paste the same URL into “OAuth2 Redirect URL”</li>
+      <li>Fill in all fields above and click Save. User linking requests <code>identify</code> + <code>guilds.join</code></li>
+      <li>Configure promotion slots (1-5) with server IDs and valid <code>https://discord.gg/...</code> invite URLs</li>
+      <li>Use <strong>Test connection</strong>, then <strong>Test</strong> on each promotion slot until it reports Connected</li>
     </ol>
   </div>
 </div>
