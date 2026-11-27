@@ -135,5 +135,52 @@ class InstallerSafetyTests(unittest.TestCase):
         self.assertNotIn("DELETE FROM vps", src)
 
 
+class ServiceRestartTests(unittest.TestCase):
+    """Regression tests for the duplicate restart that broke --update."""
+
+    def test_only_start_panel_restarts_the_panel(self):
+        src = (REPO / "installer.py").read_text()
+        start = src.index("    def start_panel(self, port: int) -> bool:")
+        end = src.index("    def start_cloudflare(", start)
+        outside = src[:start] + src[end:]
+        self.assertNotIn('"systemctl", "restart", SERVICE', outside)
+
+    def test_start_panel_restarts_once_and_accepts_redirect(self):
+        mgr = installer.ServiceManager(mock.Mock())
+        calls = []
+        result = mock.Mock(returncode=0, stdout="active\n", stderr="")
+
+        def fake_run(cmd, **kwargs):
+            calls.append(cmd)
+            return result
+
+        response = mock.MagicMock()
+        response.status = 301
+        response.__enter__.return_value = response
+        with mock.patch.object(installer.subprocess, "run", side_effect=fake_run), \
+             mock.patch.object(installer.urllib.request, "urlopen",
+                               return_value=response), \
+             mock.patch.object(installer.time, "sleep"):
+            self.assertTrue(mgr.start_panel(5000))
+        restarts = [c for c in calls if c[:2] == ["systemctl", "restart"]]
+        self.assertEqual(len(restarts), 1)
+        self.assertTrue(any(c[:2] == ["systemctl", "reset-failed"] for c in calls))
+
+    def test_health_check_failure_reports_service_state(self):
+        mgr = installer.ServiceManager(log := mock.Mock())
+        result = mock.Mock(returncode=0, stdout="failed\n", stderr="")
+
+        def fake_run(cmd, **kwargs):
+            return result
+
+        with mock.patch.object(installer.subprocess, "run", side_effect=fake_run), \
+             mock.patch.object(installer.urllib.request, "urlopen",
+                               side_effect=OSError("refused")), \
+             mock.patch.object(installer.time, "sleep"):
+            self.assertFalse(mgr.start_panel(5000))
+        logged = " ".join(str(c) for c in log.error.call_args_list)
+        self.assertIn("service state: failed", logged)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

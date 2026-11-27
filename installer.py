@@ -949,22 +949,48 @@ class ServiceManager:
             return False
 
     def start_panel(self, port: int) -> bool:
-        """Start the panel service and verify it's responding."""
+        """Restart the panel exactly once, then verify it is responding.
+
+        Every caller used to run ``systemctl restart`` itself and then call
+        this method, which restarted a second time.  Back-to-back restarts
+        during ``--update`` left the unit settling while the health check ran,
+        so the update reported failure even though a later ``--restart``
+        worked.  All restart logic lives here now.
+        """
         try:
-            subprocess.run(["systemctl", "restart", SERVICE],
-                           capture_output=True, timeout=30)
-            # Wait for HTTP response
-            for i in range(45):
+            subprocess.run(["systemctl", "reset-failed", SERVICE],
+                           capture_output=True, timeout=15)
+            restart = subprocess.run(["systemctl", "restart", SERVICE],
+                                     capture_output=True, text=True, timeout=30)
+            if restart.returncode != 0:
+                detail = (restart.stderr or restart.stdout or "").strip()[-500:]
+                self.log.error(
+                    "Failed to restart panel service: "
+                    + (detail or f"systemctl exit {restart.returncode}")
+                )
+                return False
+
+            # Give the service a moment to bind before the first probe.
+            time.sleep(2)
+            for _ in range(45):
                 try:
                     req = urllib.request.Request(f"http://127.0.0.1:{port}/")
                     with urllib.request.urlopen(req, timeout=3) as r:
-                        if r.status in (200, 302, 301):
+                        if 200 <= r.status < 400:
                             self.log.success(f"Panel responding on port {port}")
                             return True
                 except Exception:
                     pass
                 time.sleep(1)
-            self.log.error("Panel did not respond to health check")
+
+            state = subprocess.run(
+                ["systemctl", "is-active", SERVICE],
+                capture_output=True, text=True, timeout=10,
+            ).stdout.strip()
+            self.log.error(
+                "Panel did not respond to health check on port "
+                f"{port} (service state: {state or 'unknown'})"
+            )
             return False
         except Exception as e:
             self.log.error("Failed to start panel", e)
@@ -1489,8 +1515,6 @@ class Installer:
         # Service
         self.config_mgr.write_service(port, CHROOT_ROOT)
         self._open_firewall(port)
-        subprocess.run(["systemctl", "daemon-reload"], capture_output=True, timeout=30)
-        subprocess.run(["systemctl", "restart", SERVICE], capture_output=True, timeout=30)
 
         if self.service_mgr.start_panel(port):
             UI.ok("Reinstall complete")
@@ -1516,7 +1540,6 @@ class Installer:
         self.config_mgr.write_config(self._select_port())
         self.config_mgr.install_cli()
         self.config_mgr.write_service(self._select_port(), CHROOT_ROOT)
-        subprocess.run(["systemctl", "restart", SERVICE], capture_output=True, timeout=30)
         port = self._select_port()
         if self.service_mgr.start_panel(port):
             UI.ok("Panel updated and running")
@@ -1560,10 +1583,7 @@ class Installer:
         if not ok:
             UI.warn(f"SSHX isolation verification failed: {', '.join(failures)}")
 
-        # Restart
-        subprocess.run(["systemctl", "daemon-reload"], capture_output=True, timeout=30)
-        subprocess.run(["systemctl", "restart", SERVICE], capture_output=True, timeout=30)
-
+        # Restart and verify (start_panel owns the single systemd restart).
         port = self._select_port()
         if self.service_mgr.start_panel(port):
             UI.ok("Repair successful")
@@ -1678,8 +1698,6 @@ class Installer:
             subprocess.run(["systemctl", "stop", SERVICE], capture_output=True, timeout=30)
             UI.ok("Panel stopped")
         elif action == "restart":
-            subprocess.run(["systemctl", "restart", SERVICE], capture_output=True, timeout=30)
-            time.sleep(3)
             port = self._select_port()
             if self.service_mgr.start_panel(port):
                 UI.ok(f"Panel restarted on port {port}")
@@ -1784,8 +1802,6 @@ class Installer:
         self.config_mgr.write_config(port)
         self.config_mgr.write_service(port, CHROOT_ROOT)
         self._open_firewall(port)
-        subprocess.run(["systemctl", "restart", SERVICE], capture_output=True, timeout=30)
-        time.sleep(3)
         if self.service_mgr.start_panel(port):
             UI.ok(f"Panel now on port {port}")
         else:
@@ -1959,9 +1975,6 @@ class Installer:
         self.config_mgr.install_cli()
         self.config_mgr.write_service(port, CHROOT_ROOT)
         subprocess.run(["systemctl", "daemon-reload"], capture_output=True, timeout=30)
-        subprocess.run(["systemctl", "reset-failed", SERVICE], capture_output=True, timeout=30)
-        subprocess.run(["systemctl", "restart", SERVICE], capture_output=True, timeout=30)
-        time.sleep(3)
         if self.service_mgr.start_panel(port):
             UI.ok("Repair successful")
         else:
