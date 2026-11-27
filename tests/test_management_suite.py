@@ -86,6 +86,26 @@ class InstallerConfigTests(unittest.TestCase):
         self.assertIn("TRUST_PROXY=0", content)
         self.assertIn("SSHX_GATEWAY_USER=sshx-gw", content)
         self.assertIn("SSHX_MAX_PER_VPS=1", content)
+        self.assertIn("PANEL_MEMORY_MAX=100G", content)
+        self.assertIn("PANEL_MEMORY_HIGH=90G", content)
+
+    def test_write_service_applies_global_memory_cap(self):
+        with open(os.path.join(self.repo, ".env"), "w", encoding="utf-8") as f:
+            f.write("PANEL_MEMORY_MAX=100G\nPANEL_MEMORY_HIGH=90G\n")
+        service_path = os.path.join(self.tmp, "deup-panel.service")
+        with mock.patch.object(installer, "REPO_DIR", self.repo), \
+             mock.patch.object(installer, "SERVICE_FILE", service_path), \
+             mock.patch.object(installer, "PY", "/usr/bin/python3"), \
+             mock.patch.object(installer.subprocess, "run"):
+            mgr = installer.ConfigManager(self.log, {})
+            self.assertTrue(mgr.write_service(5000, "/var/lib/deup-vps"))
+        with open(service_path, "r", encoding="utf-8") as f:
+            content = f.read()
+        self.assertIn("MemoryAccounting=yes", content)
+        self.assertIn("MemoryMax=100G", content)
+        self.assertIn("MemoryHigh=90G", content)
+        # A cap must not be confused with a VPS-count limit.
+        self.assertNotIn("VPS_MAX", content)
 
     def test_install_cli_creates_root_executable_wrapper(self):
         source = os.path.join(self.repo, "management_suite.py")

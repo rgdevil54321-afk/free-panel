@@ -811,6 +811,11 @@ class ConfigManager:
                 "SSHX_SESSION_TTL": "900",
                 "SSHX_MAX_PER_USER": "2",
                 "SSHX_MAX_PER_VPS": "1",
+                # Global RAM ceiling for the panel service cgroup (panel + all
+                # VPS sshd/processes + SSHX gateways).  This is a host-load cap,
+                # not a per-VPS slot limit.  Set empty to disable.
+                "PANEL_MEMORY_MAX": "100G",
+                "PANEL_MEMORY_HIGH": "90G",
             }
             existing = self.read_config()
             merged = {**defaults, **existing}  # existing values always win
@@ -864,6 +869,19 @@ class ConfigManager:
         try:
             py = PY
             repo_dir = REPO_DIR
+            # Global RAM ceiling for the whole service cgroup.  VPS sshd and
+            # SSHX gateway processes are children of the panel, so this caps
+            # total host memory load without limiting how many VPSes exist.
+            cfg = self.read_config()
+            mem_max = (cfg.get("PANEL_MEMORY_MAX") or "").strip()
+            mem_high = (cfg.get("PANEL_MEMORY_HIGH") or "").strip()
+            mem_lines = ""
+            if mem_max:
+                mem_lines += "MemoryAccounting=yes\n"
+                mem_lines += f"MemoryMax={mem_max}\n"
+            if mem_high:
+                mem_lines += f"MemoryHigh={mem_high}\n"
+
             service_content = f"""[Unit]
 Description=DeupGaming Free Panel
 After=network-online.target
@@ -875,7 +893,7 @@ Type=simple
 User=root
 KillMode=process
 TasksMax=infinity
-WorkingDirectory={repo_dir}
+{mem_lines}WorkingDirectory={repo_dir}
 # Optional operator config (.env) is loaded so TRUST_PROXY, IP_INTEL_ENABLED
 # and other documented switches actually reach app.py. Missing file is fine.
 EnvironmentFile=-{repo_dir}/.env

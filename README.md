@@ -155,6 +155,8 @@ upgrades. Do not enable it while the origin port is directly reachable.
 | `IP_ABUSE_CHECK_ENABLED` | unset (off) | block multiple VPSes from one IP (breaks behind NAT/shared hosting) |
 | `IP_INTEL_ENABLED` | unset | enables external IP lookups |
 | `TRUST_PROXY` | `0` | only trust `X-Forwarded-*` behind a trusted reverse proxy |
+| `PANEL_MEMORY_MAX` | `100G` | hard RAM ceiling for the panel service cgroup (panel + all VPS processes); empty disables |
+| `PANEL_MEMORY_HIGH` | `90G` | soft throttle threshold before the hard ceiling |
 | `SSHX_GATEWAY_USER` | `sshx-gw` | unprivileged account that runs the SSHX gateway |
 | `SSHX_SESSION_TTL` | `900` | hard lifetime of one SSHX session (seconds) |
 | `SSHX_IDLE_TIMEOUT` | `600` | expiry after the owner stops polling (seconds) |
