@@ -408,6 +408,7 @@ class GatewayLaunchTests(unittest.TestCase):
             self.assertEqual(argv[2], session_id)
             self.assertEqual(kwargs.get("user"), 1000)
             self.assertTrue(os.path.isfile(log_path))
+            self.assertEqual(os.stat(log_path).st_mode & 0o777, 0o600)
 
     def test_verify_environment_checks_gateway_python(self):
         src = (REPO / "sshx_manager.py").read_text()

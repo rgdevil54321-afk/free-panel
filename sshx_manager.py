@@ -524,6 +524,13 @@ def _spawn_gateway(session_id: str, link_path: str, log_path: str) -> int:
         "SSHX_SSH_BINARY": SSH_BINARY,
     }
     logf = open(log_path, "ab", buffering=0)
+    # The gateway reopens this path itself after dropping privileges.  Make it
+    # writable by sshx-gw; otherwise it dies before creating the link file.
+    try:
+        os.fchmod(logf.fileno(), 0o600)
+        os.fchown(logf.fileno(), uid, gid)
+    except OSError:
+        pass
 
     def _demote():
         os.umask(0o077)
