@@ -325,6 +325,93 @@ def _mkdir_devices(root: str):
             pass
 
 
+# A chroot shares the host kernel, so guest tools such as neofetch/free read
+# the host's global /proc/meminfo.  Project the VPS's recorded RAM limit into a
+# per-guest meminfo file and bind-mount it over the guest's /proc/meminfo.
+_MEMINFO_SCALED_KEYS = frozenset({
+    "MemTotal", "MemFree", "MemAvailable", "Buffers", "Cached",
+    "SReclaimable", "Shmem", "SwapTotal", "SwapFree", "SUnreclaim",
+    "KernelStack", "PageTables", "CommitLimit", "Committed_AS",
+})
+
+
+def _guest_meminfo_source(name: str) -> str:
+    return os.path.join(_path(name), "etc", "vps-meminfo")
+
+
+def _write_guest_meminfo(name: str, ram_mb: int) -> bool:
+    """Build a meminfo file scaled to the VPS's recorded RAM allowance."""
+    try:
+        with open("/proc/meminfo", "r", encoding="utf-8", errors="replace") as f:
+            lines = f.readlines()
+        total_kb = 0
+        for line in lines:
+            if line.startswith("MemTotal:"):
+                total_kb = int(line.split()[1])
+                break
+        if total_kb <= 0 or ram_mb <= 0:
+            return False
+
+        scale = float(ram_mb * 1024) / float(total_kb)
+        output = []
+        for line in lines:
+            parts = line.split(None, 2)
+            if (len(parts) >= 2 and parts[0].rstrip(":") in _MEMINFO_SCALED_KEYS
+                    and parts[1].isdigit()):
+                value = int(int(parts[1]) * scale)
+                output.append(f"{parts[0]} {value} kB\n")
+            else:
+                output.append(line)
+
+        path = _guest_meminfo_source(name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.writelines(output)
+        os.chmod(path, 0o644)
+        return True
+    except Exception as e:
+        print(f"[vps] meminfo projection failed for {name}: {e}")
+        return False
+
+
+def _apply_guest_meminfo(name: str) -> bool:
+    meta = _load_meta(name) or {}
+    ram_mb = int(meta.get("ram_mb", 0) or 0)
+    if ram_mb <= 0:
+        return False
+    proc_meminfo = os.path.join(_path(name), "proc", "meminfo")
+    if not os.path.exists(proc_meminfo):
+        return False                      # /proc is not mounted (VPS stopped)
+    if not _write_guest_meminfo(name, ram_mb):
+        return False
+    return _mount_bind(_guest_meminfo_source(name), proc_meminfo)
+
+
+def apply_guest_limits(name: str) -> dict:
+    """Reapply recorded resource limits to a running guest (idempotent)."""
+    proc_ok = _is_mounted(os.path.join(_path(name), "proc"))
+    meminfo_ok = _apply_guest_meminfo(name) if proc_ok else False
+    return {"proc": proc_ok, "meminfo": meminfo_ok}
+
+
+def apply_guest_limits_to_all() -> int:
+    """Reapply RAM projection to every VPS in the database. Returns count."""
+    try:
+        db = sqlite3.connect(DB)
+        names = [r[0] for r in db.execute("SELECT container_id FROM vps")]
+        db.close()
+    except Exception:
+        return 0
+    applied = 0
+    for name in names:
+        try:
+            if apply_guest_limits(name)["meminfo"]:
+                applied += 1
+        except Exception:
+            pass
+    return applied
+
+
 def _prepare_runtime(name: str) -> dict:
     """Mount /proc and a PTY-capable /dev/pts inside the jail (best effort)."""
     root = _path(name)
@@ -356,11 +443,20 @@ def _prepare_runtime(name: str) -> dict:
                        "nosuid,nodev,noexec,mode=1777,size=64m")
     proc_ok = _mount_fs("proc", "proc", os.path.join(root, "proc"))
 
-    return {"proc": proc_ok, "devpts": pts_ok, "shm": shm_ok}
+    meminfo_ok = False
+    if proc_ok:
+        try:
+            meminfo_ok = _apply_guest_meminfo(name)
+        except Exception as e:
+            print(f"[vps] guest RAM projection failed for {name}: {e}")
+
+    return {"proc": proc_ok, "devpts": pts_ok, "shm": shm_ok,
+            "meminfo": meminfo_ok}
 
 
 def _teardown_runtime(name: str):
     root = _path(name)
+    _umount(os.path.join(root, "proc", "meminfo"))
     for sub in ("proc", "dev/shm", "dev/pts", "sys"):
         _umount(os.path.join(root, sub))
 

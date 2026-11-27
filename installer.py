@@ -1616,6 +1616,11 @@ class Installer:
         if not vps.base_rootfs_ready():
             UI.warn("Base rootfs missing — rebuilding")
             vps.ensure_base_rootfs(verbose=True)
+        try:
+            limited = vps.apply_guest_limits_to_all()
+            UI.ok(f"Guest RAM limit projected to {limited} running VPS(es)")
+        except Exception as e:
+            UI.warn(f"Guest RAM projection failed: {e}")
         self._clean_guest_identity()
         self.sshx_hardening.apply()
         ok, failures = self.sshx_hardening.verify()
