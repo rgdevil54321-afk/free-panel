@@ -971,18 +971,25 @@ class ServiceManager:
                 self._log_journal()
                 return False
 
-            # Give the service a moment to bind before the first probe.
-            time.sleep(2)
-            for _ in range(45):
-                try:
-                    req = urllib.request.Request(f"http://127.0.0.1:{port}/")
-                    with urllib.request.urlopen(req, timeout=3) as r:
-                        if 200 <= r.status < 400:
-                            self.log.success(f"Panel responding on port {port}")
-                            return True
-                except Exception:
-                    pass
+            # Give the service a moment to bind, then probe.  A stale process
+            # can hold the port across the first restart, so retry once before
+            # declaring failure (the second restart frees it).
+            for attempt in range(2):
+                if attempt:
+                    self.log.warn("Panel did not answer after first restart; retrying")
+                    subprocess.run(["systemctl", "restart", SERVICE],
+                                   capture_output=True, timeout=30)
                 time.sleep(1)
+                for _ in range(45):
+                    try:
+                        req = urllib.request.Request(f"http://127.0.0.1:{port}/")
+                        with urllib.request.urlopen(req, timeout=3) as r:
+                            if 200 <= r.status < 400:
+                                self.log.success(f"Panel responding on port {port}")
+                                return True
+                    except Exception:
+                        pass
+                    time.sleep(1)
 
             state = subprocess.run(
                 ["systemctl", "is-active", SERVICE],

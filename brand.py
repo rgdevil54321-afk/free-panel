@@ -23,8 +23,10 @@ IDENTITY = 'Ubuntu 24.04 LTS'
 DF_SHIM = r'''#!/bin/sh
 # Plan-aware df: rewrite the root filesystem row using the VPS disk allowance.
 REAL_DF=""
-for candidate in /usr/bin/df /bin/df; do
-    [ -x "$candidate" ] && REAL_DF="$candidate" && break
+for candidate in /usr/bin/df.real /bin/df.real /usr/bin/df /bin/df; do
+    [ -x "$candidate" ] || continue
+    grep -q '^# Plan-aware df' "$candidate" 2>/dev/null && continue
+    REAL_DF="$candidate" && break
 done
 if [ -z "$REAL_DF" ]; then
     echo "df: real df binary not found" >&2
@@ -100,36 +102,88 @@ if [ "$cores" -gt 0 ]; then
     printf '%s\n' "$cores"
     exit 0
 fi
-for candidate in /usr/bin/nproc /bin/nproc; do
-    [ -x "$candidate" ] && exec "$candidate" "$@"
+for candidate in /usr/bin/nproc.real /bin/nproc.real /usr/bin/nproc /bin/nproc; do
+    [ -x "$candidate" ] || continue
+    grep -q '^# Plan-aware nproc' "$candidate" 2>/dev/null && continue
+    exec "$candidate" "$@"
 done
 echo "nproc: real nproc binary not found" >&2
 exit 127
 '''
 
+PROFILE_SHIM = r'''# Keep plan-aware df/nproc ahead of cached command paths in login shells.
+case ":$PATH:" in
+    *:/usr/local/bin:*) ;;
+    *) PATH="/usr/local/bin:$PATH" ;;
+esac
+export PATH
+hash -r 2>/dev/null || true
+'''
+
+# (shim path, canonical binary path, saved real binary, script)
 RESOURCE_SHIMS = (
-    ("usr/local/bin/df", DF_SHIM),
-    ("usr/local/bin/nproc", NPROC_SHIM),
+    ("usr/local/bin/df", "usr/bin/df", "usr/bin/df.real", DF_SHIM),
+    ("usr/local/bin/nproc", "usr/bin/nproc", "usr/bin/nproc.real", NPROC_SHIM),
 )
 
 
+def _write_script(root: str, rel: str, script: str) -> bool:
+    path = os.path.join(root, rel)
+    try:
+        if os.path.isfile(path):
+            with open(path, "r", encoding="utf-8", errors="replace") as f:
+                if f.read() == script:
+                    return False
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            f.write(script)
+        os.chmod(path, 0o755)
+        return True
+    except OSError:
+        return False
+
+
 def install_resource_shims(root: str) -> bool:
-    """Install df/nproc plan shims into a guest root. Returns True if changed."""
+    """Install df/nproc plan shims into a guest root. Returns True if changed.
+
+    The shim is written to /usr/local/bin *and* over the canonical /usr/bin
+    path.  Some guests resolve df from /usr/bin first (explicit paths, cached
+    hashes, or scripts that reset PATH), so only covering /usr/local/bin is not
+    enough.  The original binary is saved as <name>.real before replacement.
+    """
     changed = False
-    for rel, script in RESOURCE_SHIMS:
-        path = os.path.join(root, rel.lstrip("/"))
-        try:
-            if os.path.isfile(path):
-                with open(path, "r", encoding="utf-8", errors="replace") as f:
-                    if f.read() == script:
-                        continue
-            os.makedirs(os.path.dirname(path), exist_ok=True)
-            with open(path, "w", encoding="utf-8") as f:
-                f.write(script)
-            os.chmod(path, 0o755)
+    for shim_rel, bin_rel, backup_rel, script in RESOURCE_SHIMS:
+        binary = os.path.join(root, bin_rel)
+        backup = os.path.join(root, backup_rel)
+        # Save a genuine coreutils binary once; never back up our own shim.
+        if os.path.isfile(binary) and not os.path.isfile(backup):
+            try:
+                with open(binary, "r", encoding="utf-8", errors="replace") as f:
+                    is_shim = f.read(64).startswith("#!/bin/sh\n# Plan-aware")
+                if not is_shim:
+                    os.makedirs(os.path.dirname(backup), exist_ok=True)
+                    shutil.copy2(binary, backup)
+                    changed = True
+            except OSError:
+                pass
+        if os.path.isfile(backup):
+            changed |= _write_script(root, bin_rel, script)
+        changed |= _write_script(root, shim_rel, script)
+
+    profile = os.path.join(root, "etc", "profile.d", "vps-plan.sh")
+    try:
+        current = ""
+        if os.path.isfile(profile):
+            with open(profile, "r", encoding="utf-8", errors="replace") as f:
+                current = f.read()
+        if current != PROFILE_SHIM:
+            os.makedirs(os.path.dirname(profile), exist_ok=True)
+            with open(profile, "w", encoding="utf-8") as f:
+                f.write(PROFILE_SHIM)
+            os.chmod(profile, 0o644)
             changed = True
-        except OSError:
-            pass
+    except OSError:
+        pass
     return changed
 
 

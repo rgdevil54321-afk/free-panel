@@ -66,6 +66,19 @@ class ResourceShimTests(unittest.TestCase):
             self.assertTrue(os.access(path, os.X_OK))
         self.assertFalse(brand.install_resource_shims(root))
 
+    def test_canonical_df_is_backed_up_then_shimmed(self):
+        root = os.path.join(self.tmp, "guest")
+        real = os.path.join(root, "usr", "bin", "df")
+        os.makedirs(os.path.dirname(real), exist_ok=True)
+        with open(real, "w") as f:
+            f.write("REAL COREUTILS DF\n")
+        self.assertTrue(brand.install_resource_shims(root))
+        with open(real) as f:
+            self.assertEqual(f.read(), brand.DF_SHIM)
+        with open(real + ".real") as f:
+            self.assertEqual(f.read(), "REAL COREUTILS DF\n")
+        self.assertFalse(brand.install_resource_shims(root))
+
     def test_df_shim_rewrites_only_root_row(self):
         fake_df = os.path.join(self.tmp, "real-df")
         with open(fake_df, "w") as f:
