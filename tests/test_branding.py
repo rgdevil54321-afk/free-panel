@@ -98,6 +98,25 @@ class ResourceShimTests(unittest.TestCase):
         self.assertNotIn("967G", result.stdout)
         self.assertIn("126G", result.stdout)
 
+    def test_df_shim_handles_cpuinfo_mount_label(self):
+        """The CPU bind mount makes df label the root row /proc/cpuinfo."""
+        fake_df = os.path.join(self.tmp, "real-df")
+        with open(fake_df, "w") as f:
+            f.write("#!/bin/sh\n"
+                    "printf '%s\\n' "
+                    "'Filesystem Size Used Avail Use% Mounted on' "
+                    "'/dev/sda1 968G 19G 949G 2% /proc/cpuinfo'\n")
+        os.chmod(fake_df, 0o755)
+        script = (brand.DF_SHIM
+                  .replace("/usr/bin/df", fake_df)
+                  .replace("/etc/vps-limits", self.limits))
+        result = self._run_shim(script, "-P", "-h", "/")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        line = result.stdout.splitlines()[1]
+        self.assertIn("80G", line)
+        self.assertTrue(line.endswith(" /"), line)
+        self.assertNotIn("968G", result.stdout)
+
     def test_nproc_shim_reports_plan_cores(self):
         script = brand.NPROC_SHIM.replace("/etc/vps-limits", self.limits)
         result = self._run_shim(script)

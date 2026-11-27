@@ -49,7 +49,23 @@ case "$disk_gb" in
 esac
 [ "$disk_gb" -gt 0 ] || { printf '%s\n' "$output"; exit "$status"; }
 
-printf '%s\n' "$output" | awk -v gb="$disk_gb" '
+# The /proc/cpuinfo and /proc/meminfo bind mounts make df label the root row
+# with a /proc path instead of "/".  Track whether the caller asked about a
+# specific path so we can rewrite that row regardless of its label.
+asked_path=0
+exact_root=0
+for arg in "$@"; do
+    case "$arg" in
+        -*) ;;
+        /)  asked_path=1; exact_root=1 ;;
+        /*) asked_path=1 ;;
+    esac
+done
+root_source=$("$REAL_DF" -P / 2>/dev/null | awk 'NR == 2 {print $1}')
+
+printf '%s\n' "$output" | awk -v gb="$disk_gb" \
+        -v asked_path="$asked_path" -v exact_root="$exact_root" \
+        -v root_source="$root_source" '
 function toblocks(s,   u, v) {
     u = substr(s, length(s), 1)
     if (u ~ /[A-Za-z]/) {
@@ -69,7 +85,15 @@ function fmtg(blocks,   v) {
 }
 NR == 1 { print; next }
 {
-    if ($NF != "/" || $5 !~ /^[0-9]+%$/) { print; next }
+    # Which row is the root filesystem?
+    if (asked_path) {
+        is_root = (NR == 2)
+    } else {
+        is_root = ($NF == "/" ||
+                   (root_source != "" && $1 == root_source &&
+                    $NF ~ /^\/(proc\/(cpuinfo|meminfo)|etc\/(hosts|resolv\.conf))$/))
+    }
+    if (!is_root || $5 !~ /^[0-9]+%$/) { print; next }
     human = (substr($2, length($2), 1) ~ /[A-Za-z]/)
     total_real = toblocks($2)
     used_real = toblocks($3)
@@ -84,6 +108,7 @@ NR == 1 { print; next }
         $2 = total; $3 = used; $4 = avail
     }
     $5 = pct "%"
+    if (exact_root) $NF = "/"
     print
 }'
 exit "$status"
