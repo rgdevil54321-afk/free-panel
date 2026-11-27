@@ -1523,6 +1523,23 @@ class Installer:
             UI.err("Reinstall failed — attempting repair")
             self._repair_panel(port)
 
+    def _clean_guest_identity(self):
+        """Remove legacy fake neofetch wrappers from every existing guest."""
+        sys.path.insert(0, REPO_DIR)
+        try:
+            import brand
+            cleaned, total, installed = brand.clean_existing_guests(CHROOT_ROOT)
+            if cleaned or installed:
+                UI.ok(
+                    f"Guest identity cleaned ({cleaned}/{total} roots); "
+                    f"real neofetch/fastfetch in {installed} guest(s)"
+                )
+            else:
+                UI.info(f"Guest identity already clean ({total} roots checked)")
+        except Exception as e:
+            UI.warn(f"Guest identity cleanup failed: {e}")
+            self.log.error("Guest identity cleanup failed", e)
+
     def _do_update(self):
         """Update panel (git pull + deps)."""
         UI.section("Updating Panel")
@@ -1537,6 +1554,7 @@ class Installer:
                 self.log.warn(f"git pull failed: {e}")
         self.dep_manager.install_python_deps()
         self.sshx_hardening.apply()
+        self._clean_guest_identity()
         self.config_mgr.write_config(self._select_port())
         self.config_mgr.install_cli()
         self.config_mgr.write_service(self._select_port(), CHROOT_ROOT)
@@ -1578,6 +1596,7 @@ class Installer:
         if not vps.base_rootfs_ready():
             UI.warn("Base rootfs missing — rebuilding")
             vps.ensure_base_rootfs(verbose=True)
+        self._clean_guest_identity()
         self.sshx_hardening.apply()
         ok, failures = self.sshx_hardening.verify()
         if not ok:
