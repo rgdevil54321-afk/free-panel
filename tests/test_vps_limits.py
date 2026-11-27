@@ -47,6 +47,21 @@ class GuestRamProjectionTests(unittest.TestCase):
         self.assertFalse(result["meminfo"])
         self.assertFalse(result["proc"])
 
+    def test_bind_mount_targets_existing_file(self):
+        """makedirs() must not be called on an existing /proc/meminfo file."""
+        source = os.path.join(self.tmp, "vps-meminfo")
+        target = os.path.join(self.root, "proc", "meminfo")
+        os.makedirs(os.path.dirname(target), exist_ok=True)
+        with open(source, "w") as f:
+            f.write("MemTotal: 16384 kB\n")
+        with open(target, "w") as f:
+            f.write("MemTotal: 262144 kB\n")
+        with mock.patch.object(vps, "_is_mounted", return_value=False), \
+             mock.patch.object(vps, "_run",
+                               return_value=mock.Mock(returncode=0)) as run:
+            self.assertTrue(vps._mount_bind(source, target))
+        self.assertEqual(run.call_args[0][0], ["mount", "--bind", source, target])
+
     def test_apply_all_reads_container_ids_from_db(self):
         db_path = os.path.join(self.tmp, "panel.db")
         db = sqlite3.connect(db_path)

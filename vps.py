@@ -238,10 +238,14 @@ def _is_mounted(target: str) -> bool:
 def _mount_bind(src: str, dst: str) -> bool:
     if _is_mounted(dst):
         return True
-    try:
-        os.makedirs(dst, exist_ok=True)
-    except Exception:
-        return False
+    # The target may be an existing file (e.g. /proc/meminfo).  makedirs()
+    # raises FileExistsError on a file even with exist_ok=True, so only create
+    # parent directories when the target is genuinely missing.
+    if not os.path.exists(dst):
+        try:
+            os.makedirs(dst, exist_ok=True)
+        except Exception:
+            return False
     try:
         return _run(["mount", "--bind", src, dst], timeout=15).returncode == 0
     except Exception:
@@ -405,10 +409,14 @@ def apply_guest_limits_to_all() -> int:
     applied = 0
     for name in names:
         try:
-            if apply_guest_limits(name)["meminfo"]:
+            ram_mb = int((_load_meta(name) or {}).get("ram_mb", 0) or 0)
+            ok = apply_guest_limits(name)["meminfo"]
+            print(f"[vps] {name}: RAM limit {ram_mb} MB -> guest meminfo "
+                  f"{'projected' if ok else 'not applied (VPS stopped?)'}")
+            if ok:
                 applied += 1
-        except Exception:
-            pass
+        except Exception as e:
+            print(f"[vps] {name}: RAM projection error: {e}")
     return applied
 
 
