@@ -116,7 +116,7 @@
 
   {% if limits %}
   <div class="card card-sm">
-    <div class="card-title">Free tier</div>
+    <div class="card-title">{{ 'VPS resources' if vps else 'Free tier' }}</div>
     <div style="display:flex;flex-direction:column;gap:.35rem;">
       <div class="flex-b" style="font-size:.72rem;font-family:var(--mono);">
         <span style="color:var(--text-3);">CPU</span><span style="color:var(--text-2);">{{ limits.cpu }} vCPU</span>

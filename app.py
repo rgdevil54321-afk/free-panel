@@ -25,7 +25,7 @@ from vps import (
     get_free_vps_cpu, get_free_vps_ram, get_free_vps_disk,
     kvm_available, set_kvm_enabled,
     get_root_password, reset_root_password,
-    get_max_vps_per_node, generate_password,
+    get_max_vps_per_node, generate_password, get_vps_specs,
     update_vps_resources,
 )
 from monitor import start_monitor
@@ -499,11 +499,21 @@ def dashboard():
         "ORDER BY feedback.created_at DESC LIMIT 20"
     ).fetchall()
 
-    limits = {
-        "cpu":  get_free_vps_cpu(),
-        "ram":  get_free_vps_ram() // 1024,
-        "disk": get_free_vps_disk(),
-    }
+    # Show the selected VPS's recorded resources, not the global defaults for
+    # newly created VPSes. Fall back to defaults before any VPS exists.
+    specs = get_vps_specs(vps["container_id"]) if vps else None
+    if specs:
+        limits = {
+            "cpu":  specs["cpu_cores"],
+            "ram":  specs["ram_mb"] // 1024,
+            "disk": specs["disk_gb"],
+        }
+    else:
+        limits = {
+            "cpu":  get_free_vps_cpu(),
+            "ram":  get_free_vps_ram() // 1024,
+            "disk": get_free_vps_disk(),
+        }
     can_feedback = bool(vps and vps["status"] == "running" and vps["ssh_command"])
 
     root_password = None
